@@ -63,20 +63,27 @@ Core protocols that get JSON Schemas in the first pass: discover-features 2.0,
 trust-ping 2.0, basicmessage 2.0, report-problem 2.0, coordinate-mediation 3.0,
 messagepickup 3.0, routing 2.0, out-of-band 2.0, documentation 1.0.
 
-### Phase 2: shared agent crate (`didcomm` repo)
+### Phase 2: shared agent crate (`didcomm` repo) -- done except WebSocket
 
-Pull the agent-runtime pieces that `didcomm-peer-service` currently hand-rolls into a
-reusable, publishable crate (working name `didcomm-agent`):
+`crates/didcomm-agent` in the `didcomm` repo. It's the agent runtime that
+`didcomm-peer-service` used to hand-roll, as a reusable crate, and the peer service is
+now built on it:
 
-- `send`: pack, POST, and unpack the synchronous reply (`return_route: all`). Header
-  completion already lives in `didcomm-core`'s `pack`, so this crate doesn't repeat it.
-- a WebSocket transport (the Indicio mediator advertises one)
-- mediation setup (`coordinate-mediation/3.0`) and the pickup cycle
-  (`messagepickup/3.0`); add a `message-pickup/4.0` client if the target mediator needs it
-- a responder for `discover-features/2.0` queries, and one for `trust-ping/2.0`
-- saving and loading key material (JWK file to start; the storage layer is pluggable)
+- `Identity`: Ed25519 + X25519 keys in a `0600` JWK file. The agent's DIDs are derived
+  from the keys and an endpoint, so they survive restarts without storing anything else.
+- `Agent::send` / `Agent::request` over HTTP(S). `request` asks for `return_route: all`,
+  checks the reply's thread, and returns a problem report as an `AgentError::Problem`.
+- `Agent::mediate` (`coordinate-mediation/3.0`) and `Agent::pickup`
+  (`messagepickup/3.0`, acknowledging what it collects).
+- `Features` plus `Agent::auto_reply` for `discover-features/2.0` and `trust-ping/2.0`,
+  and `respond` / `pack_reply` to reply on the connection or to the sender's endpoint.
+- Header completion lives in `didcomm-core`'s `pack` (see the findings below).
 
-`didcomm-peer-service` then becomes a thin user of this crate.
+Verified live against the Indicio public mediator: mediation, a message forwarded
+through it to our mediated DID, and pickup.
+
+Not done: a WebSocket transport. The MCP server polls with `fetch_messages`, so it
+isn't needed yet; it's needed only for live delivery.
 
 ### Phase 3: `documentation-server`
 
@@ -133,7 +140,7 @@ Probed live with this workspace's Rust stack (`did:peer:4` sender, authcrypt, HT
   (`HeaderPolicy::Complete`; `HeaderPolicy::Verbatim` opts out), and `unpack` rejects a
   `from` that doesn't own the sender key. Verified live against this mediator with
   messages carrying only `type` and `body`.
-- **It discloses `routing/3.0`, not `routing/2.0`.** didcomm.org documents only
-  `routing/2.0`, and `didcomm-core` wraps forwards as `routing/2.0`. Peers sending
-  *to* us through Indicio are affected: the manual smoke test must confirm Indicio
-  accepts `routing/2.0` forwards. If it doesn't, add `routing/3.0` to the routing layer.
+- **It discloses `routing/3.0`, not `routing/2.0`, but accepts `routing/2.0` forwards**,
+  which is what `didcomm-core` sends. Confirmed by `didcomm-agent`'s live test: a
+  message forwarded through Indicio to our mediated DID was picked up intact. No
+  `routing/3.0` support is needed for it.
