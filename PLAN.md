@@ -95,7 +95,7 @@ Rust and `rmcp`, over stdio. Tools (fixed; new protocols never add tools):
 | `lookup_protocol_documentation` | `protocol_uri`, `sections?` | Sends documentation/1.0 `request` to the configured registry. |
 | `search_protocols` | `match?`, `status?`, `tag?` | Sends documentation/1.0 `query`. |
 | `lookup_spec` | `version?`, `section?` | Sends documentation/1.0 `spec-request`. |
-| `send_didcomm_message` | `target_did`, `type`, `body`, `thid?`, `pthid?`, `wait_for_reply?` | The server fills in `id`, `from`, `created_time` and threading. Optionally checks the body against a schema fetched from the registry before sending. |
+| `send_didcomm_message` | `target_did`, `type`, `body`, `thid?`, `pthid?`, `wait_for_reply?` | The server fills in `id`, `from`, `to`, `created_time` and threading. Optionally checks the body against a schema fetched from the registry before sending. |
 | `fetch_messages` | `limit?` | Pickup from the mediator. Returns decrypted messages with sender DID and thread ids. |
 
 Configuration (TOML file plus environment-variable overrides): key file path (created
@@ -117,12 +117,21 @@ test drives the brief's six-step flow: discover, look up, basicmessage, protocol
 message, fetch the reply. A separate manual, non-CI smoke test runs against the
 Indicio mediator.
 
-## Open issues
+## Findings from probing the Indicio mediator (2026-10-01)
 
-- **Indicio mediator returns 500 on DIDComm v2 messages (2026-10-01).** We probed it
-  with valid authcrypt and anoncrypt envelopes (sender `did:peer:2` and `did:peer:4`;
-  trust-ping and discover-features). Every one got HTTP 500 with an unencrypted
-  `report-problem/2.0` (`e.m.me`, "Internal server error"). Junk input gets a clean 400,
-  so the mediator parses the envelope and fails afterwards. It still needs to be found
-  out, with Indicio's help, which protocol versions it speaks and whether the fault is
-  on their side or ours.
+Probed live with this workspace's Rust stack (`did:peer:4` sender, authcrypt, HTTP,
+`return_route: all`):
+
+- trust-ping, discover-features, `coordinate-mediation/3.0` mediate-request, and
+  `messagepickup/3.0` status-request all work. It discloses `discover-features/2.0`,
+  `trust-ping/2.0`, `coordinate-mediation/3.0`, `messagepickup/3.0` and **`routing/3.0`**.
+- **The plaintext must carry `from` and `to`** (plus `id` and `created_time`). Without
+  them the mediator returns HTTP 500 with an `e.m.me` problem report.
+  `didcomm-core`'s `pack` doesn't add these fields, and `didcomm-messaging-python`
+  tolerates their absence, which is why our wire-compat tests never caught it. The
+  shared agent crate (phase 2) always fills them in, and `pack` should check that
+  `from` matches the authcrypt sender.
+- **It discloses `routing/3.0`, not `routing/2.0`.** didcomm.org documents only
+  `routing/2.0`, and `didcomm-core` wraps forwards as `routing/2.0`. Peers sending
+  *to* us through Indicio are affected: the manual smoke test must confirm Indicio
+  accepts `routing/2.0` forwards. If it doesn't, add `routing/3.0` to the routing layer.
