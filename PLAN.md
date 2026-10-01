@@ -93,30 +93,29 @@ plus discover-features and trust-ping, as a `did:peer:4` (default) or a `did:web
 ships as a ~150 MB container image. Its tests validate every reply against the
 published `documentation/1.0` schemas.
 
-### Phase 4: `mcp` (this repo)
+### Phase 4: `mcp` (this repo) -- done
 
-Rust and `rmcp`, over stdio. Tools (fixed; new protocols never add tools):
+Built as planned: Rust and `rmcp` 3.5, over stdio, on `didcomm-agent`. The seven tools
+are `get_identity`, `discover_features`, `search_protocols`,
+`lookup_protocol_documentation`, `lookup_spec`, `send_didcomm_message` and
+`fetch_messages`. See README.md for configuration. Details:
 
-| Tool | Arguments | Notes |
-|---|---|---|
-| `get_identity` | — | Our DID and the mediator in use, to share with peers. |
-| `discover_features` | `target_did`, `match?` | Sends discover-features/2.0 `queries`; returns the `disclose` results. |
-| `lookup_protocol_documentation` | `protocol_uri`, `sections?` | Sends documentation/1.0 `request` to the configured registry. |
-| `search_protocols` | `match?`, `status?`, `tag?` | Sends documentation/1.0 `query`. |
-| `lookup_spec` | `version?`, `section?` | Sends documentation/1.0 `spec-request`. |
-| `send_didcomm_message` | `target_did`, `type`, `body`, `thid?`, `pthid?`, `wait_for_reply?` | The server fills in `id`, `from`, `to`, `created_time` and threading. Optionally checks the body against a schema fetched from the registry before sending. |
-| `fetch_messages` | `limit?` | Pickup from the mediator. Returns decrypted messages with sender DID and thread ids. |
+- **Validation.** Outgoing messages get their headers filled in *before* validation, so
+  the registry's schema checks exactly what is sent. A schema is only used when the
+  registry returns that exact protocol version. If no schema can be had, the result
+  says so, and the message isn't blocked.
+- **Untrusted content.** Peer and registry content comes back after an UNTRUSTED
+  CONTENT marker naming its source. Problem reports become tool errors (`isError`),
+  with the report itself marked the same way.
+- **Mediation.** It starts in the background so it doesn't hold up the MCP handshake.
+  A failed attempt is retried by the next tool that needs it.
+- **`fetch_messages`** auto-answers trust-pings and discover-features queries among the
+  messages it collects.
 
-Configuration (TOML file plus environment-variable overrides): key file path (created
-on first run, permissions `0600`), registry DID, mediator DID (default: the Indicio
-public mediator), optional allow-list of DIDs we may send to.
-
-Security posture:
-- Keys never leave the server.
-- Everything that came from a peer or the registry is returned clearly marked as
-  untrusted content, because it lands in the AI's context and could carry a prompt
-  injection.
-- Sending is a separate, explicit tool, so the MCP host's approval prompt covers it.
+Found while testing against Indicio, and fixed in `didcomm-agent`: messages to the
+agent's *own* mediator must come from its base DID (`Agent::did_for`). Otherwise the
+mediator routes its reply back into itself. Also added: a 30 s default HTTP timeout
+(`Agent::with_http_client` overrides it).
 
 ### Phase 5: end-to-end test
 
