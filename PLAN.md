@@ -85,12 +85,13 @@ through it to our mediated DID, and pickup.
 Not done: a WebSocket transport. The MCP server polls with `fetch_messages`, so it
 isn't needed yet; it's needed only for live delivery.
 
-### Phase 3: `documentation-server`
+### Phase 3: `documentation-server` -- done
 
-See [documentation-server's PLAN.md](https://github.com/wyvrn-cloud/documentation-server/blob/master/PLAN.md).
-In short: submodules plus configurable source folders, a startup indexer keyed by PIURI,
-the `schemas/` overlay, and an axum DIDComm endpoint with its own `did:web` that answers
-`documentation/1.0`, `discover-features/2.0` and `trust-ping/2.0`.
+Built as planned; see that repo's README and PLAN.md. It indexes all 50 didcomm.org
+definitions and three spec versions. It answers `query`, `request` and `spec-request`,
+plus discover-features and trust-ping, as a `did:peer:4` (default) or a `did:web`. It
+ships as a ~150 MB container image. Its tests validate every reply against the
+published `documentation/1.0` schemas.
 
 ### Phase 4: `mcp` (this repo)
 
