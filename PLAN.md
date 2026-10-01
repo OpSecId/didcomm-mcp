@@ -68,7 +68,8 @@ messagepickup 3.0, routing 2.0, out-of-band 2.0, documentation 1.0.
 Pull the agent-runtime pieces that `didcomm-peer-service` currently hand-rolls into a
 reusable, publishable crate (working name `didcomm-agent`):
 
-- `send`: pack, POST, and unpack the synchronous reply (`return_route: all`)
+- `send`: pack, POST, and unpack the synchronous reply (`return_route: all`). Header
+  completion already lives in `didcomm-core`'s `pack`, so this crate doesn't repeat it.
 - a WebSocket transport (the Indicio mediator advertises one)
 - mediation setup (`coordinate-mediation/3.0`) and the pickup cycle
   (`messagepickup/3.0`); add a `message-pickup/4.0` client if the target mediator needs it
@@ -127,10 +128,11 @@ Probed live with this workspace's Rust stack (`did:peer:4` sender, authcrypt, HT
   `trust-ping/2.0`, `coordinate-mediation/3.0`, `messagepickup/3.0` and **`routing/3.0`**.
 - **The plaintext must carry `from` and `to`** (plus `id` and `created_time`). Without
   them the mediator returns HTTP 500 with an `e.m.me` problem report.
-  `didcomm-core`'s `pack` doesn't add these fields, and `didcomm-messaging-python`
-  tolerates their absence, which is why our wire-compat tests never caught it. The
-  shared agent crate (phase 2) always fills them in, and `pack` should check that
-  `from` matches the authcrypt sender.
+  `didcomm-messaging-python`'s `pack` never adds them. **Fixed in `didcomm-core`:**
+  `pack` now fills in any that are missing and rejects contradictory ones by default
+  (`HeaderPolicy::Complete`; `HeaderPolicy::Verbatim` opts out), and `unpack` rejects a
+  `from` that doesn't own the sender key. Verified live against this mediator with
+  messages carrying only `type` and `body`.
 - **It discloses `routing/3.0`, not `routing/2.0`.** didcomm.org documents only
   `routing/2.0`, and `didcomm-core` wraps forwards as `routing/2.0`. Peers sending
   *to* us through Indicio are affected: the manual smoke test must confirm Indicio
