@@ -194,6 +194,12 @@ def main():
         err, texts, _ = mcp.tool("send_didcomm_message",
                                  {"target_did": bob, "type": "https://didcomm.org/trust_ping/1.0/ping", "body": {}})
         check(err and "no DIDComm v1 service" in texts[0], "a DIDComm v1 type goes out as v1: Bob (v2 only) can't take it", texts)
+        err, _, issue = mcp.tool("lookup_protocol_documentation",
+                                 {"protocol_uri": "https://didcomm.org/issue-credential/2.0", "sections": []})
+        formats = {f["format"]: f for f in issue["message"]["body"].get("attachment_formats", [])}
+        offer = formats.get("anoncreds/credential-offer@v1.0", {}).get("uses", [{}])[0]
+        check(offer.get("attachment") == "offers~attach" and "schema" in offer,
+              f"issue-credential/2.0 lists its attachment formats: {sorted(formats)}")
         err, _, l10n = mcp.tool("lookup_spec", {"document": "extension/l10n", "section": "scope"})
         check("accept-lang" in l10n["message"]["body"]["section"]["markdown"], "the l10n extension")
         err, _, rfc = mcp.tool("lookup_spec", {"version": "1.0", "section": "rfc0008"})

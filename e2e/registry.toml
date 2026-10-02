@@ -24,6 +24,8 @@ mappings = "mappings/piuri-paths.toml"
 revisions = "sources/revisions.toml"
 # Upper bound on documentation query page size.
 max_query_limit = 200
+# The attachment formats issue-credential and present-proof carry, with their schemas.
+attachment_formats = "attachment-formats/formats.toml"
 
 [[source]]
 name = "didcomm.org"
