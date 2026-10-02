@@ -51,6 +51,8 @@ async fn start_server() -> String {
         identity_path: PathBuf::from("unused"),
         registry_did: None,
         mediator_did: None,
+        v1_mediator: None,
+        state_path: std::env::temp_dir().join(format!("didcomm-mcp-test-{}.json", uuid::Uuid::new_v4())),
         allowed_targets: None,
         validate_messages: true,
         http: http_config.clone(),
@@ -127,7 +129,7 @@ async fn tools_work_over_http() {
     let client = connect(&url, Some(TOKEN)).await.unwrap();
 
     let tools = client.list_tools(None).await.unwrap().tools;
-    assert_eq!(tools.len(), 7);
+    assert_eq!(tools.len(), 10);
 
     let ping = data(&call(&client, "send_didcomm_message", json!({
         "target_did": peer.did(),

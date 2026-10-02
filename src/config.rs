@@ -26,7 +26,16 @@ pub struct Config {
     /// The mediator that receives messages for this agent. `None` disables mediation:
     /// replies then only arrive on the same connection (`wait_for_reply`).
     pub mediator_did: Option<String>,
-    /// If set, `send_didcomm_message` and `discover_features` only talk to these DIDs.
+    /// The DIDComm v1 mediator: a DID to connect to through DID Exchange (an implicit
+    /// invitation), or an out-of-band invitation (URL or JSON). Defaults to
+    /// `mediator_did`; `None` -- configured as `""` -- leaves this agent without a v1
+    /// address, so v1 peers can only answer on the same connection.
+    pub v1_mediator: Option<String>,
+    /// Connections, created invitations and the v1 mediation, kept across restarts.
+    /// Defaults to `connections.json` next to the identity file.
+    pub state_path: PathBuf,
+    /// If set, `send_didcomm_message` and `discover_features` only talk to these DIDs
+    /// (and connections with them).
     pub allowed_targets: Option<Vec<String>>,
     /// Check outgoing messages against the registry's schema for their type (when it
     /// has one) before sending.
@@ -75,6 +84,9 @@ struct ConfigFile {
     registry_did: Option<String>,
     /// `""` disables mediation.
     mediator_did: Option<String>,
+    /// `""` disables v1 mediation.
+    v1_mediator: Option<String>,
+    state_path: Option<PathBuf>,
     allowed_targets: Option<Vec<String>>,
     validate_messages: Option<bool>,
     #[serde(default)]
@@ -110,6 +122,11 @@ impl Config {
         let mediator_did = env("DIDCOMM_MCP_MEDIATOR_DID")
             .or(file.mediator_did)
             .unwrap_or_else(|| DEFAULT_MEDIATOR.to_string());
+        let v1_mediator = env("DIDCOMM_MCP_V1_MEDIATOR").or(file.v1_mediator).unwrap_or_else(|| mediator_did.clone());
+        let state_path = env("DIDCOMM_MCP_STATE")
+            .map(PathBuf::from)
+            .or(file.state_path)
+            .unwrap_or_else(|| identity_path.with_file_name("connections.json"));
         // Comma-separated environment lists.
         let list = |v: String| v.split(',').map(|d| d.trim().to_string()).filter(|d| !d.is_empty()).collect();
         let allowed_targets = env("DIDCOMM_MCP_ALLOWED_TARGETS").map(list).or(file.allowed_targets);
@@ -129,6 +146,8 @@ impl Config {
             identity_path,
             registry_did: Some(registry_did).filter(|d| !d.trim().is_empty()),
             mediator_did: Some(mediator_did).filter(|d| !d.trim().is_empty()),
+            v1_mediator: Some(v1_mediator).filter(|d| !d.trim().is_empty()),
+            state_path,
             allowed_targets,
             validate_messages,
         }
@@ -187,6 +206,17 @@ mod tests {
     fn empty_registry_disables_the_registry() {
         assert_eq!(resolve("registry_did = \"\"", &[]).registry_did, None);
         assert_eq!(resolve("", &[("DIDCOMM_MCP_REGISTRY_DID", "")]).registry_did, None);
+    }
+
+    #[test]
+    fn v1_mediation_follows_the_mediator_unless_set() {
+        let config = resolve("", &[]);
+        assert_eq!(config.v1_mediator.as_deref(), Some(DEFAULT_MEDIATOR));
+        assert_eq!(config.state_path, config.identity_path.with_file_name("connections.json"));
+        assert_eq!(resolve("mediator_did = \"did:example:m\"", &[]).v1_mediator.as_deref(), Some("did:example:m"));
+        assert_eq!(resolve("v1_mediator = \"\"", &[]).v1_mediator, None);
+        assert_eq!(resolve("", &[("DIDCOMM_MCP_V1_MEDIATOR", "https://m.example/?oob=x")]).v1_mediator.as_deref(), Some("https://m.example/?oob=x"));
+        assert_eq!(resolve("state_path = \"/tmp/s.json\"", &[]).state_path, PathBuf::from("/tmp/s.json"));
     }
 
     #[test]
