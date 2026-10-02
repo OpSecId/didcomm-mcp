@@ -15,21 +15,22 @@ path = "src/main.rs"
 # Tracks didcomm's default branch; pin a tag (tag = "...") once it publishes releases.
 didcomm-agent = { git = "https://github.com/wyvrn-cloud/didcomm" }
 anyhow = "1"
+axum = "0.8"
 # Validates outgoing messages against the registry's schemas.
 jsonschema = { version = "0.33", default-features = false }
-rmcp = { version = "3.5", features = ["server", "transport-io", "macros", "schemars"] }
+rmcp = { version = "3.5", features = ["server", "transport-io", "transport-streamable-http-server", "macros", "schemars"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-std"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-std", "net", "signal"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-axum = "0.8"
+reqwest = { version = "0.13", features = ["json"] }
 didcomm-mediator-core = { git = "https://github.com/wyvrn-cloud/didcomm" }
 didcomm-quickstart = { git = "https://github.com/wyvrn-cloud/didcomm" }
-rmcp = { version = "3.5", features = ["client", "transport-async-rw"] }
+rmcp = { version = "3.5", features = ["client", "transport-async-rw", "transport-streamable-http-client-reqwest"] }

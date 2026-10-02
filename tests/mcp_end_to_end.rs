@@ -152,6 +152,7 @@ async fn world(customize: impl FnOnce(&mut Config)) -> World {
         mediator_did: Some(mediator),
         allowed_targets: None,
         validate_messages: true,
+        http: Default::default(),
     };
     customize(&mut config);
     let bridge = Arc::new(Bridge::new(Agent::new(Identity::generate().unwrap()).unwrap(), config));

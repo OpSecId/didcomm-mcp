@@ -117,6 +117,13 @@ agent's *own* mediator must come from its base DID (`Agent::did_for`). Otherwise
 mediator routes its reply back into itself. Also added: a 30 s default HTTP timeout
 (`Agent::with_http_client` overrides it).
 
+### After phase 5: HTTP transport
+
+`didcomm-mcp --http [<address>]` serves the same tools over MCP Streamable HTTP at
+`/mcp`, as an alternative to stdio. A bearer token is mandatory beyond loopback, `Host`
+checking defaults to loopback names (DNS-rebinding protection), and every session
+shares the one agent.
+
 ### Phase 5: end-to-end test -- done
 
 `e2e/docker-compose.yml` runs the real documentation server, a mediator and a peer

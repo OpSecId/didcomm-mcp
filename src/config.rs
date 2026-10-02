@@ -31,6 +31,39 @@ pub struct Config {
     /// Check outgoing messages against the registry's schema for their type (when it
     /// has one) before sending.
     pub validate_messages: bool,
+    /// The Streamable HTTP transport (`--http`).
+    pub http: HttpConfig,
+}
+
+/// Default `http.bind`: loopback only.
+pub const DEFAULT_HTTP_BIND: &str = "127.0.0.1:8090";
+
+/// Settings for serving MCP over Streamable HTTP (`didcomm-mcp --http`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpConfig {
+    /// Address to listen on (default [`DEFAULT_HTTP_BIND`]).
+    pub bind: String,
+    /// Clients must send `Authorization: Bearer <token>`. Required unless `bind` is a
+    /// loopback address: anyone who can reach the endpoint acts with this agent's keys.
+    pub auth_token: Option<String>,
+    /// `Host` header values to accept, e.g. `["mcp.example.com"]`. Defaults to
+    /// loopback names only, which protects local servers against DNS rebinding; list
+    /// the server's public hostnames when serving beyond localhost.
+    pub allowed_hosts: Option<Vec<String>>,
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self { bind: DEFAULT_HTTP_BIND.to_string(), auth_token: None, allowed_hosts: None }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HttpFile {
+    bind: Option<String>,
+    auth_token: Option<String>,
+    allowed_hosts: Option<Vec<String>>,
 }
 
 /// The file's shape: everything optional.
@@ -44,6 +77,8 @@ struct ConfigFile {
     mediator_did: Option<String>,
     allowed_targets: Option<Vec<String>>,
     validate_messages: Option<bool>,
+    #[serde(default)]
+    http: HttpFile,
 }
 
 impl Config {
@@ -75,14 +110,22 @@ impl Config {
         let mediator_did = env("DIDCOMM_MCP_MEDIATOR_DID")
             .or(file.mediator_did)
             .unwrap_or_else(|| DEFAULT_MEDIATOR.to_string());
-        let allowed_targets = env("DIDCOMM_MCP_ALLOWED_TARGETS")
-            .map(|list| list.split(',').map(|d| d.trim().to_string()).filter(|d| !d.is_empty()).collect())
-            .or(file.allowed_targets);
+        // Comma-separated environment lists.
+        let list = |v: String| v.split(',').map(|d| d.trim().to_string()).filter(|d| !d.is_empty()).collect();
+        let allowed_targets = env("DIDCOMM_MCP_ALLOWED_TARGETS").map(list).or(file.allowed_targets);
         let validate_messages = env("DIDCOMM_MCP_VALIDATE_MESSAGES")
             .map(|v| !matches!(v.trim(), "0" | "false" | "no" | "off"))
             .or(file.validate_messages)
             .unwrap_or(true);
+        let http = HttpConfig {
+            bind: env("DIDCOMM_MCP_HTTP_BIND")
+                .or(file.http.bind)
+                .unwrap_or_else(|| DEFAULT_HTTP_BIND.to_string()),
+            auth_token: env("DIDCOMM_MCP_HTTP_TOKEN").or(file.http.auth_token).filter(|t| !t.is_empty()),
+            allowed_hosts: env("DIDCOMM_MCP_HTTP_ALLOWED_HOSTS").map(list).or(file.http.allowed_hosts),
+        };
         Self {
+            http,
             identity_path,
             registry_did: Some(registry_did).filter(|d| !d.trim().is_empty()),
             mediator_did: Some(mediator_did).filter(|d| !d.trim().is_empty()),
@@ -156,6 +199,21 @@ mod tests {
     fn allowed_targets_from_the_environment() {
         let config = resolve("", &[("DIDCOMM_MCP_ALLOWED_TARGETS", "did:example:a, did:example:b,")]);
         assert_eq!(config.allowed_targets, Some(vec!["did:example:a".to_string(), "did:example:b".to_string()]));
+    }
+
+    #[test]
+    fn http_settings() {
+        let defaults = resolve("", &[]).http;
+        assert_eq!(defaults, HttpConfig { bind: DEFAULT_HTTP_BIND.into(), auth_token: None, allowed_hosts: None });
+
+        let configured = resolve(
+            "[http]\nbind = \"0.0.0.0:9000\"\nauth_token = \"from-file\"\nallowed_hosts = [\"a.example\"]",
+            &[("DIDCOMM_MCP_HTTP_TOKEN", "from-env"), ("DIDCOMM_MCP_HTTP_ALLOWED_HOSTS", "b.example, c.example")],
+        )
+        .http;
+        assert_eq!(configured.bind, "0.0.0.0:9000");
+        assert_eq!(configured.auth_token.as_deref(), Some("from-env"));
+        assert_eq!(configured.allowed_hosts, Some(vec!["b.example".to_string(), "c.example".to_string()]));
     }
 
     #[test]
