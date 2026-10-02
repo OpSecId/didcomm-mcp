@@ -41,8 +41,7 @@ MCP host configuration (e.g. Claude Code's `.mcp.json` or Claude Desktop's confi
 {
   "mcpServers": {
     "didcomm": {
-      "command": "/path/to/didcomm-mcp",
-      "env": { "DIDCOMM_MCP_REGISTRY_DID": "did:web:docs.example" }
+      "command": "/path/to/didcomm-mcp"
     }
   }
 }
@@ -56,8 +55,7 @@ secret a TLS-intercepting proxy needs):
   "mcpServers": {
     "didcomm": {
       "command": "docker",
-      "args": ["run", "-i", "--rm", "-v", "didcomm-mcp:/data",
-               "-e", "DIDCOMM_MCP_REGISTRY_DID=did:web:docs.example", "didcomm-mcp"]
+      "args": ["run", "-i", "--rm", "-v", "didcomm-mcp:/data", "didcomm-mcp"]
     }
   }
 }
@@ -76,7 +74,7 @@ Environment variables override the file.
 | Setting (`config.toml`) | Environment | Default | |
 |---|---|---|---|
 | `identity_path` | `DIDCOMM_MCP_IDENTITY` | `~/.local/share/didcomm-mcp/identity.json` | This agent's keys. Keep the file to keep the DID. |
-| `registry_did` | `DIDCOMM_MCP_REGISTRY_DID` | none | The documentation registry. Without it, the lookup tools report that none is configured and sends skip validation. |
+| `registry_did` | `DIDCOMM_MCP_REGISTRY_DID` | `did:web:docs.wyvrn.app` | The [documentation registry](https://github.com/wyvrn-cloud/documentation-server). `""` disables it: the lookup tools then report that none is configured, and sends skip validation. |
 | `mediator_did` | `DIDCOMM_MCP_MEDIATOR_DID` | the Indicio public mediator | Receives messages for this agent. `""` disables mediation; replies then only arrive via `wait_for_reply`. Indicio's is for development and demos, not production. |
 | `allowed_targets` | `DIDCOMM_MCP_ALLOWED_TARGETS` (comma-separated) | any | If set, only these DIDs can be messaged or queried. |
 | `validate_messages` | `DIDCOMM_MCP_VALIDATE_MESSAGES` | `true` | Schema-check outgoing messages. |
