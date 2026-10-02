@@ -1,0 +1,45 @@
+# documentation-server config for the e2e stack: reachable as http://registry:8080/
+# on the compose network. Relative paths are relative to /app in the image.
+
+[server]
+bind = "0.0.0.0:8080"
+# The URL peers reach this server at; it becomes the DIDComm service endpoint.
+public_url = "http://registry:8080/"
+# "peer": a did:peer:4 derived from the identity's keys and public_url (works anywhere,
+#         including plain-HTTP local setups).
+# "web":  a did:web derived from public_url, whose document this server publishes at
+#         /.well-known/did.json. public_url must then be the HTTPS origin peers resolve.
+did_method = "peer"
+
+[identity]
+# Created on first start; keep it to keep the server's DID.
+path = "data/identity.json"
+
+[index]
+# JSON Schema overlay folders, laid out by PIURI (see schemas/README.md). Schemas shipped
+# next to a protocol definition (<protocol>/<version>/schemas/*.json) win over these.
+schemas = ["schemas"]
+mappings = "mappings/piuri-paths.toml"
+# Upper bound on documentation/1.0 query page size.
+max_query_limit = 200
+
+[[source]]
+name = "didcomm.org"
+kind = "protocol-registry"
+path = "sources/didcomm.org/site/content/protocols"
+# Prefix of the PIURI a folder <name>/<version> is expected to have.
+piuri_base = "https://didcomm.org/"
+
+[[source]]
+name = "didcomm-messaging"
+kind = "didcomm-spec"
+path = "sources/didcomm-messaging"
+
+# More folders of protocol definitions in the didcomm.org layout can be added, e.g. a
+# checkout of https://github.com/wyvrn-cloud/protocols (off by default):
+#
+# [[source]]
+# name = "wyvrn"
+# kind = "protocol-registry"
+# path = "/srv/wyvrn-protocols/protocols"
+# piuri_base = "https://wyvrn.app/"

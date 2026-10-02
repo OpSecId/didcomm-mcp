@@ -1,0 +1,35 @@
+[package]
+name = "didcomm-mcp"
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/wyvrn-cloud/mcp"
+description = "An MCP server that lets AI agents discover, learn and use DIDComm v2 protocols with any peer"
+publish = false
+
+[[bin]]
+name = "didcomm-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# Tracks didcomm's default branch; pin a tag (tag = "...") once it publishes releases.
+didcomm-agent = { git = "https://github.com/wyvrn-cloud/didcomm" }
+anyhow = "1"
+# Validates outgoing messages against the registry's schemas.
+jsonschema = { version = "0.33", default-features = false }
+rmcp = { version = "3.5", features = ["server", "transport-io", "macros", "schemars"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-std"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+axum = "0.8"
+didcomm-mediator-core = { git = "https://github.com/wyvrn-cloud/didcomm" }
+didcomm-quickstart = { git = "https://github.com/wyvrn-cloud/didcomm" }
+rmcp = { version = "3.5", features = ["client", "transport-async-rw"] }
