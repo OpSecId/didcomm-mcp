@@ -8,6 +8,9 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+/// The documentation/1.0 registry the lookup tools ask by default.
+pub const DEFAULT_REGISTRY: &str = "did:web:docs.wyvrn.app";
+
 /// The Indicio public mediator: a free DIDComm v2 mediator meant for development and
 /// demos, not production.
 pub const DEFAULT_MEDIATOR: &str = "did:web:us-east2.public.mediator.indiciotech.io";
@@ -16,8 +19,9 @@ pub const DEFAULT_MEDIATOR: &str = "did:web:us-east2.public.mediator.indiciotech
 pub struct Config {
     /// This agent's private keys; created on first start.
     pub identity_path: PathBuf,
-    /// The documentation/1.0 registry the lookup tools ask. Without one they report
-    /// that none is configured.
+    /// The documentation/1.0 registry the lookup tools ask (default
+    /// [`DEFAULT_REGISTRY`]). `None` -- configured as `""` -- disables them: they then
+    /// report that none is configured, and sends skip schema validation.
     pub registry_did: Option<String>,
     /// The mediator that receives messages for this agent. `None` disables mediation:
     /// replies then only arrive on the same connection (`wait_for_reply`).
@@ -34,6 +38,7 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 struct ConfigFile {
     identity_path: Option<PathBuf>,
+    /// `""` disables the registry.
     registry_did: Option<String>,
     /// `""` disables mediation.
     mediator_did: Option<String>,
@@ -64,7 +69,9 @@ impl Config {
             .map(PathBuf::from)
             .or(file.identity_path)
             .unwrap_or_else(default_identity_path);
-        let registry_did = env("DIDCOMM_MCP_REGISTRY_DID").or(file.registry_did);
+        let registry_did = env("DIDCOMM_MCP_REGISTRY_DID")
+            .or(file.registry_did)
+            .unwrap_or_else(|| DEFAULT_REGISTRY.to_string());
         let mediator_did = env("DIDCOMM_MCP_MEDIATOR_DID")
             .or(file.mediator_did)
             .unwrap_or_else(|| DEFAULT_MEDIATOR.to_string());
@@ -77,7 +84,7 @@ impl Config {
             .unwrap_or(true);
         Self {
             identity_path,
-            registry_did: registry_did.filter(|d| !d.trim().is_empty()),
+            registry_did: Some(registry_did).filter(|d| !d.trim().is_empty()),
             mediator_did: Some(mediator_did).filter(|d| !d.trim().is_empty()),
             allowed_targets,
             validate_messages,
@@ -118,7 +125,7 @@ mod tests {
     fn defaults() {
         let config = resolve("", &[]);
         assert_eq!(config.mediator_did.as_deref(), Some(DEFAULT_MEDIATOR));
-        assert_eq!(config.registry_did, None);
+        assert_eq!(config.registry_did.as_deref(), Some(DEFAULT_REGISTRY));
         assert!(config.validate_messages);
         assert!(config.identity_path.ends_with("didcomm-mcp/identity.json"));
     }
@@ -131,6 +138,12 @@ mod tests {
         );
         assert_eq!(config.registry_did.as_deref(), Some("did:example:env"));
         assert!(!config.validate_messages);
+    }
+
+    #[test]
+    fn empty_registry_disables_the_registry() {
+        assert_eq!(resolve("registry_did = \"\"", &[]).registry_did, None);
+        assert_eq!(resolve("", &[("DIDCOMM_MCP_REGISTRY_DID", "")]).registry_did, None);
     }
 
     #[test]
