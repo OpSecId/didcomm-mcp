@@ -7,7 +7,8 @@ architecture brief's workflow with raw MCP JSON-RPC:
 
   discover Bob's features -> search and look up a protocol in the registry ->
   a schema-rejected send -> a valid send (Bob's reply comes back) -> Bob messages us
-  through the mediator -> fetch_messages picks it up -> read a spec section.
+  through the mediator -> fetch_messages picks it up -> read a spec section -> DIDComm v1
+  protocols and spec, and an extension.
 
 Usage: e2e/run.py [--no-build] [--keep]
   --no-build  use already-built images (didcomm-e2e/*)
@@ -181,6 +182,22 @@ def main():
         step("the spec")
         err, _, spec = mcp.tool("lookup_spec", {"version": "2.1", "section": "message-headers"})
         check("`thid`" in spec["message"]["body"]["section"]["markdown"], "spec v2.1 message-headers section")
+
+        step("DIDComm v1 and the extensions")
+        err, _, v1 = mcp.tool("search_protocols", {"didcomm_version": "1.0", "text": "trust ping"})
+        piuris = [e["piuri"] for e in v1["message"]["body"]["entries"]]
+        check("https://didcomm.org/trust_ping/1.0" in piuris, f"v1 search finds trust_ping/1.0: {piuris}")
+        err, _, ping = mcp.tool("lookup_protocol_documentation",
+                                {"protocol_uri": "https://didcomm.org/trust-ping/1.0", "sections": []})
+        check(ping["message"]["body"]["didcomm_versions"] == ["^1.0"], "an Aries RFC protocol, for DIDComm v1",
+              ping["message"]["body"].get("didcomm_versions"))
+        err, texts, _ = mcp.tool("send_didcomm_message",
+                                 {"target_did": bob, "type": "https://didcomm.org/trust_ping/1.0/ping", "body": {}})
+        check(err and "DIDComm v1" in texts[0], "sending a DIDComm v1 type is refused", texts)
+        err, _, l10n = mcp.tool("lookup_spec", {"document": "extension/l10n", "section": "scope"})
+        check("accept-lang" in l10n["message"]["body"]["section"]["markdown"], "the l10n extension")
+        err, _, rfc = mcp.tool("lookup_spec", {"version": "1.0", "section": "rfc0008"})
+        check("~thread" in rfc["message"]["body"]["section"]["markdown"], "DIDComm v1 threading (RFC 0008)")
 
         print("\nPASS: the full workflow works end to end")
     finally:

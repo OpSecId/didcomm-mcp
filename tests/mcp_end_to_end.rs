@@ -2,9 +2,9 @@
 //! transport, and behind them real DIDComm parties run over HTTP on localhost -- a
 //! mediator (`didcomm-mediator-core`), a documentation registry, and "Bob".
 //!
-//! The registry here is a small stand-in answering documentation/1.0 for one protocol,
-//! so these tests don't need the documentation-server and its sources;
-//! documentation-server's own tests cover the real thing.
+//! The registry here is a small stand-in answering documentation/1.1 (or, in one test,
+//! only 1.0) for two protocols, so these tests don't need the documentation-server and
+//! its sources; documentation-server's own tests cover the real thing.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,7 +22,8 @@ use rmcp::{
 use serde_json::{json, Value};
 
 const BASICMESSAGE: &str = "https://didcomm.org/basicmessage/2.0/message";
-const DOCUMENTATION: &str = "https://wyvrn.app/documentation/1.0";
+const BASICMESSAGE_V1: &str = "https://didcomm.org/basicmessage/1.0/message";
+const DOCUMENTATION: &str = "https://wyvrn.app/documentation/1.1";
 
 async fn listener() -> (tokio::net::TcpListener, String) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -89,42 +90,85 @@ fn basicmessage_schema() -> Value {
     })
 }
 
-/// A documentation/1.0 registry that knows basicmessage/2.0 only.
+fn basicmessage_v1_schema() -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": ["@id", "@type", "content"],
+        "properties": {"@type": {"const": BASICMESSAGE_V1}, "content": {"type": "string"}},
+    })
+}
+
+/// A documentation registry that knows basicmessage 2.0 (DIDComm v2) and 1.0 (DIDComm v1
+/// only), answering each request in the documentation version it was asked in.
 fn registry_answers(received: &Received) -> Option<Value> {
     let body = &received.message["body"];
-    match received.message_type() {
-        "https://wyvrn.app/documentation/1.0/query" => Some(received.reply(
-            "https://wyvrn.app/documentation/1.0/catalog",
-            json!({"total": 1, "offset": 0, "entries": [{
-                "piuri": "https://didcomm.org/basicmessage/2.0",
+    let (piuri, name) = received.message_type().rsplit_once('/')?;
+    let reply = |name: &str, body: Value| Some(received.reply(&format!("{piuri}/{name}"), body));
+    match name {
+        "query" => {
+            let entries: Vec<Value> = [
+                json!({"piuri": "https://didcomm.org/basicmessage/2.0", "title": "Basic Message", "status": "Production", "has_schemas": true, "didcomm_versions": ["^2.0"]}),
+                json!({"piuri": "https://didcomm.org/basicmessage/1.0", "title": "Basic Message", "status": "Adopted", "has_schemas": true, "didcomm_versions": ["^1.0"]}),
+            ]
+            .into_iter()
+            .filter(|e| match body["didcomm_version"].as_str() {
+                Some("1.0") => e["didcomm_versions"][0] == "^1.0",
+                Some(_) => e["didcomm_versions"][0] == "^2.0",
+                None => true,
+            })
+            .collect();
+            reply("catalog", json!({"total": entries.len(), "offset": 0, "entries": entries}))
+        }
+        "request" => {
+            let requested = body["piuri"].as_str().unwrap_or_default();
+            let (piuri, message) = if requested.starts_with("https://didcomm.org/basicmessage/2.0") {
+                ("https://didcomm.org/basicmessage/2.0", json!({
+                    "type": BASICMESSAGE, "didcomm_versions": ["^2.0"], "examples": [],
+                    "schema": basicmessage_schema(),
+                    "schemas": [{"didcomm_versions": ["^2.0"], "schema": basicmessage_schema()}],
+                }))
+            } else if requested.starts_with("https://didcomm.org/basicmessage/1.0") {
+                ("https://didcomm.org/basicmessage/1.0", json!({
+                    "type": BASICMESSAGE_V1, "didcomm_versions": ["^1.0"], "examples": [],
+                    "schema": basicmessage_v1_schema(),
+                    "schemas": [{"didcomm_versions": ["^1.0"], "schema": basicmessage_v1_schema()}],
+                }))
+            } else {
+                return Some(received.problem_report("e.p.not-found.protocol", "No documentation for protocol {1}", &[requested]));
+            };
+            reply("response", json!({
+                "piuri": piuri,
                 "title": "Basic Message",
                 "status": "Production",
-                "has_schemas": true,
-            }]}),
-        )),
-        "https://wyvrn.app/documentation/1.0/request" => {
-            let piuri = body["piuri"].as_str().unwrap_or_default();
-            if !piuri.starts_with("https://didcomm.org/basicmessage/2.0") {
-                return Some(received.problem_report("e.p.not-found.protocol", "No documentation for protocol {1}", &[piuri]));
-            }
-            Some(received.reply(
-                "https://wyvrn.app/documentation/1.0/response",
-                json!({
-                    "piuri": "https://didcomm.org/basicmessage/2.0",
-                    "title": "Basic Message",
-                    "status": "Production",
-                    "available_sections": [{"id": "roles", "title": "Roles", "level": 2}],
-                    "sections": [],
-                    "messages": [{"type": BASICMESSAGE, "examples": [], "schema": basicmessage_schema()}],
-                }),
-            ))
+                "didcomm_versions": message["didcomm_versions"],
+                "available_sections": [{"id": "roles", "title": "Roles", "level": 2}],
+                "sections": [],
+                "messages": [message],
+            }))
         }
-        "https://wyvrn.app/documentation/1.0/spec-request" => Some(received.reply(
-            "https://wyvrn.app/documentation/1.0/spec-response",
-            json!({"version": "2.1", "title": "Spec", "section": {"id": "x", "title": "X", "markdown": "text"}}),
-        )),
+        "spec-request" => reply("spec-response", json!({
+            "document": body["document"].as_str().unwrap_or("spec"),
+            "version": body["version"].as_str().unwrap_or("2.1"),
+            "title": "Spec",
+            "section": {"id": "x", "title": "X", "markdown": "text"},
+        })),
         _ => None,
     }
+}
+
+/// A registry that only knows documentation/1.0, as one deployed before 1.1 would.
+fn registry_1_0_answers(received: &Received) -> Option<Value> {
+    if received.message_type().starts_with("https://wyvrn.app/documentation/1.1/") {
+        return Some(received.problem_report("e.p.msg.unsupported", "Unsupported message type {1}", &[received.message_type()]));
+    }
+    let mut reply = registry_answers(received)?;
+    // 1.0 has no per-version schemas.
+    for message in reply["body"]["messages"].as_array_mut().into_iter().flatten() {
+        message.as_object_mut().unwrap().remove("schemas");
+        message.as_object_mut().unwrap().remove("didcomm_versions");
+    }
+    Some(reply)
 }
 
 #[derive(Clone, Default)]
@@ -142,6 +186,10 @@ struct World {
 }
 
 async fn world(customize: impl FnOnce(&mut Config)) -> World {
+    world_with(registry_answers, customize).await
+}
+
+async fn world_with(registry_answers: fn(&Received) -> Option<Value>, customize: impl FnOnce(&mut Config)) -> World {
     let mediator = start_mediator().await;
     let registry = start_agent(Features::standard().with_protocol(DOCUMENTATION, &["registry"]), registry_answers).await;
     let bob = start_agent(Features::standard().with_protocol("https://didcomm.org/basicmessage/2.0", &["receiver"]), bob_answers).await;
@@ -219,8 +267,9 @@ async fn the_architecture_brief_workflow() {
     assert!(disclosures.as_array().unwrap().iter().any(|d| d["id"] == "https://didcomm.org/basicmessage/2.0"));
 
     // 3-4. Learn the protocol from the registry.
-    let found = data(&world.call("search_protocols", json!({"text": "basic"})).await);
+    let found = data(&world.call("search_protocols", json!({"text": "basic", "didcomm_version": "2.1"})).await);
     assert_eq!(found["message"]["body"]["total"], 1);
+    assert_eq!(found["message"]["type"], "https://wyvrn.app/documentation/1.1/catalog");
     let docs = data(&world.call(
         "lookup_protocol_documentation",
         json!({"protocol_uri": "https://didcomm.org/basicmessage/2.0", "sections": []}),
@@ -326,4 +375,55 @@ async fn works_without_a_registry_or_mediator() {
         "target_did": bob, "type": features::TRUST_PING_PING, "body": {}, "wait_for_reply": true,
     })).await;
     assert_eq!(data(&ping)["reply"]["message"]["type"], features::TRUST_PING_RESPONSE);
+}
+
+#[tokio::test]
+async fn didcomm_v1_message_types_are_refused() {
+    let world = world(|_| {}).await;
+
+    let refused = world
+        .call("send_didcomm_message", json!({"target_did": world.bob.did(), "type": BASICMESSAGE_V1, "body": {}}))
+        .await;
+
+    assert_eq!(refused.is_error, Some(true));
+    let text = &texts(&refused)[0];
+    assert!(text.contains("DIDComm v1 message type") && text.contains("^1.0"), "{text}");
+}
+
+#[tokio::test]
+async fn documents_and_versions_reach_the_registry() {
+    let world = world(|_| {}).await;
+
+    let v1 = data(&world.call("search_protocols", json!({"didcomm_version": "1.0"})).await);
+    assert_eq!(v1["message"]["body"]["entries"][0]["piuri"], "https://didcomm.org/basicmessage/1.0");
+
+    let extension = data(&world.call("lookup_spec", json!({"document": "extension/l10n", "section": "x"})).await);
+    assert_eq!(extension["message"]["body"]["document"], "extension/l10n");
+    let v1_spec = data(&world.call("lookup_spec", json!({"version": "1.0"})).await);
+    assert_eq!(v1_spec["message"]["body"]["version"], "1.0");
+}
+
+#[tokio::test]
+async fn a_documentation_1_0_registry_still_works() {
+    let world = world_with(registry_1_0_answers, |_| {}).await;
+    let bob = world.bob.did();
+
+    let found = data(&world.call("search_protocols", json!({"text": "basic"})).await);
+    assert_eq!(found["message"]["type"], "https://wyvrn.app/documentation/1.0/catalog");
+
+    let invalid = world.call("send_didcomm_message", json!({"target_did": bob, "type": BASICMESSAGE, "body": {}})).await;
+    assert_eq!(invalid.is_error, Some(true), "validated against the 1.0 response's schema");
+    let sent = data(&world.call(
+        "send_didcomm_message",
+        json!({"target_did": bob, "type": BASICMESSAGE, "body": {"content": "hi"}, "wait_for_reply": true}),
+    ).await);
+    assert_eq!(sent["validation"], "passed");
+
+    // 1.0 doesn't say which DIDComm version a type is for; a v1 schema (pinning @type)
+    // isn't used to validate a v2 message, and the send isn't refused.
+    let v1 = data(&world.call(
+        "send_didcomm_message",
+        json!({"target_did": bob, "type": BASICMESSAGE_V1, "body": {}, "wait_for_reply": false}),
+    ).await);
+    assert_eq!(v1["validation"], "skipped: the registry has no schema for this message type");
 }

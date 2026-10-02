@@ -18,13 +18,17 @@ use crate::bridge::{received_json, Bridge, BridgeError, Outgoing};
 
 const INSTRUCTIONS: &str = "\
 Talk to DIDComm v2 agents. Messages are end-to-end encrypted and authenticated by this \
-server; you only handle plaintext JSON.
+server; you only handle plaintext JSON. The registry also documents DIDComm v1 (Aries) \
+protocols; each protocol and message type says which DIDComm versions it is used with \
+(didcomm_versions, e.g. ^1.0 or ^2.0), and only DIDComm v2 ones can be sent from here.
 
 Typical workflow:
 1. discover_features on the peer's DID to see which protocols (PIURIs) it supports.
 2. search_protocols / lookup_protocol_documentation to learn a protocol from the \
 documentation registry: its roles, message types, examples and JSON Schemas. Ask for \
-only the sections you need.
+only the sections you need. lookup_spec reads the DIDComm Messaging spec (version 1.0 \
+is DIDComm v1, from the Aries RFCs) and other documents, such as its extensions \
+(extension/l10n, extension/return_route, ...); its table of contents lists them.
 3. send_didcomm_message with the message type and a body matching the schema. Use \
 thid to continue a thread (the id of the message that started it).
 4. fetch_messages to collect replies that arrive later.
@@ -65,6 +69,10 @@ pub struct SearchProtocolsArgs {
     /// Only protocols with at least one of these tags.
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+    /// Only protocols usable with this DIDComm version, e.g. `2.1` (what this server
+    /// sends) or `1.0` (DIDComm v1 / Aries).
+    #[serde(default)]
+    pub didcomm_version: Option<String>,
     /// Page size (default 50).
     #[serde(default)]
     pub limit: Option<u32>,
@@ -89,8 +97,12 @@ pub struct LookupProtocolArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LookupSpecArgs {
-    /// Spec version: `2.0`, `2.1` or `editors-draft`. Defaults to the latest numbered
-    /// version.
+    /// Which document: `spec` (the default) is the DIDComm Messaging specification;
+    /// others, such as `extension/l10n`, are listed in any table of contents.
+    #[serde(default)]
+    pub document: Option<String>,
+    /// The document's version. For the spec: `2.1`, `2.0`, `1.0` (DIDComm v1, compiled
+    /// from the Aries RFCs) or `editors-draft`. Defaults to the latest published one.
     #[serde(default)]
     pub version: Option<String>,
     /// Section id. Omit to get the table of contents.
@@ -194,7 +206,7 @@ impl DidcommMcp {
     }
 
     #[tool(
-        description = "Search the documentation registry's catalog of DIDComm protocols by protocol URI pattern, text, status or tag. Returns matching protocols with title, status, summary, and whether JSON Schemas are available.",
+        description = "Search the documentation registry's catalog of DIDComm protocols by protocol URI pattern, text, status, tag or DIDComm version. Returns matching protocols with title, status, summary, the DIDComm versions they're used with, and whether JSON Schemas are available.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn search_protocols(&self, Parameters(args): Parameters<SearchProtocolsArgs>) -> Result<CallToolResult, ErrorData> {
@@ -204,6 +216,7 @@ impl DidcommMcp {
             ("text", args.text.map(Value::from)),
             ("status", args.status.map(Value::from)),
             ("tags", args.tags.map(Value::from)),
+            ("didcomm_version", args.didcomm_version.map(Value::from)),
             ("limit", args.limit.map(Value::from)),
             ("offset", args.offset.map(Value::from)),
         ] {
@@ -215,7 +228,7 @@ impl DidcommMcp {
     }
 
     #[tool(
-        description = "Get a DIDComm protocol's definition from the documentation registry: metadata, roles, the prose sections you ask for, and every message type with examples and its JSON Schema (when the registry has one). Ask for specific sections to keep the result small.",
+        description = "Get a DIDComm protocol's definition from the documentation registry: metadata, roles, the DIDComm versions it's used with, the prose sections you ask for, and every message type with examples and its JSON Schemas (one per DIDComm version, when the registry has them). Ask for specific sections to keep the result small.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn lookup_protocol_documentation(&self, Parameters(args): Parameters<LookupProtocolArgs>) -> Result<CallToolResult, ErrorData> {
@@ -227,15 +240,19 @@ impl DidcommMcp {
     }
 
     #[tool(
-        description = "Read the DIDComm Messaging specification from the documentation registry: its table of contents, or one section (with its subsections).",
+        description = "Read the DIDComm Messaging specification (v2.x, or v1 as compiled from the Aries RFCs) or another document the registry serves, such as a spec extension: its table of contents (which also lists every document), or one section with its subsections.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn lookup_spec(&self, Parameters(args): Parameters<LookupSpecArgs>) -> Result<CallToolResult, ErrorData> {
-        Ok(reply_result(self.bridge.lookup_spec(args.version.as_deref(), args.section.as_deref()).await))
+        let result = self
+            .bridge
+            .lookup_spec(args.document.as_deref(), args.version.as_deref(), args.section.as_deref())
+            .await;
+        Ok(reply_result(result))
     }
 
     #[tool(
-        description = "Send a DIDComm message: encrypted to the recipient, authenticated as this agent, and delivered over HTTP(S), through the recipient's mediator if it has one. You give the type and body; id, from, to and created_time are filled in. Checked against the registry's JSON Schema for the type first, if it has one.",
+        description = "Send a DIDComm message: encrypted to the recipient, authenticated as this agent, and delivered over HTTP(S), through the recipient's mediator if it has one. You give the type and body; id, from, to and created_time are filled in. Checked against the registry's JSON Schema for the type first, if it has one. DIDComm v2 only: message types the registry lists for DIDComm v1 alone are refused.",
         annotations(read_only_hint = false, destructive_hint = false, open_world_hint = true)
     )]
     async fn send_didcomm_message(&self, Parameters(args): Parameters<SendMessageArgs>) -> Result<CallToolResult, ErrorData> {
