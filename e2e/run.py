@@ -157,6 +157,7 @@ def main():
         body = docs["message"]["body"]
         check(body["roles"] == ["sender", "receiver"], "roles from the real didcomm.org definition", body.get("roles"))
         check(any(m["type"] == BASICMESSAGE and "schema" in m for m in body["messages"]), "message schema included")
+        check(len(body["source"].get("revision", "")) == 40, "the registry names the source commit", body["source"])
 
         step("a message that breaks the schema is refused")
         err, texts, _ = mcp.tool("send_didcomm_message",
