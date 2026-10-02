@@ -49,7 +49,7 @@ MCP host configuration (e.g. Claude Code's `.mcp.json` or Claude Desktop's confi
 ```
 
 Or as a container (`docker build -t didcomm-mcp .`; see the Dockerfile for the build
-secrets a private `didcomm` dependency or a TLS-intercepting proxy needs):
+secret a TLS-intercepting proxy needs):
 
 ```json
 {
@@ -125,5 +125,11 @@ submodules). Override their locations with `DIDCOMM_DIR` / `DOCSERVER_DIR`. The 
 
 `--no-build` reuses already-built `didcomm-e2e/*` images. `--keep` leaves the stack
 running.
+
+### CI
+
+`.github/workflows/ci.yml` runs `cargo test`, a `docker build`, and `e2e/run.py` on every
+pull request. The end-to-end job needs a `WYVRN_READ_TOKEN` repository secret, a token
+that can read the private `wyvrn-cloud/documentation-server`; without it, the job skips.
 
 See [`PLAN.md`](PLAN.md) for the design of the whole system.
