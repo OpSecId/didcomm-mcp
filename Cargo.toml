@@ -12,9 +12,8 @@ name = "didcomm-mcp"
 path = "src/main.rs"
 
 [dependencies]
-# Pinned to the branch carrying didcomm-agent until it merges; switch to the default
-# branch (or a tag) then.
-didcomm-agent = { git = "https://github.com/wyvrn-cloud/didcomm", branch = "claude/admiring-mayer-68xfrs" }
+# Tracks didcomm's default branch; pin a tag (tag = "...") once it publishes releases.
+didcomm-agent = { git = "https://github.com/wyvrn-cloud/didcomm" }
 anyhow = "1"
 # Validates outgoing messages against the registry's schemas.
 jsonschema = { version = "0.33", default-features = false }
@@ -31,6 +30,6 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 axum = "0.8"
-didcomm-mediator-core = { git = "https://github.com/wyvrn-cloud/didcomm", branch = "claude/admiring-mayer-68xfrs" }
-didcomm-quickstart = { git = "https://github.com/wyvrn-cloud/didcomm", branch = "claude/admiring-mayer-68xfrs" }
+didcomm-mediator-core = { git = "https://github.com/wyvrn-cloud/didcomm" }
+didcomm-quickstart = { git = "https://github.com/wyvrn-cloud/didcomm" }
 rmcp = { version = "3.5", features = ["client", "transport-async-rw"] }
