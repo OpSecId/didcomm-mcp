@@ -61,6 +61,45 @@ secret a TLS-intercepting proxy needs):
 }
 ```
 
+### Over HTTP
+
+`didcomm-mcp --http [<address>]` serves MCP over
+[Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http)
+at `http://<address>/mcp` instead of stdio. The default address is `127.0.0.1:8090`
+(`http.bind`). All sessions share one agent: the same keys, DID and mediator.
+
+- **A bearer token** (`DIDCOMM_MCP_HTTP_TOKEN`, or `http.auth_token`) is required in
+  every request's `Authorization: Bearer` header when set. It's *mandatory* for any
+  non-loopback address, and the server refuses to start without one, because anyone
+  who can reach the endpoint acts with this agent's keys.
+- **`Host` checking** accepts loopback names only by default, to stop DNS rebinding
+  against a local server. To serve under a real hostname, list it in
+  `DIDCOMM_MCP_HTTP_ALLOWED_HOSTS` (comma-separated) or `http.allowed_hosts`. Put TLS in
+  front (a reverse proxy) for anything beyond localhost.
+- **`GET /healthz`** answers without a token.
+
+```sh
+DIDCOMM_MCP_HTTP_TOKEN=$(openssl rand -hex 32) didcomm-mcp --http
+docker run --rm -p 127.0.0.1:8090:8090 -v didcomm-mcp:/data \
+  -e DIDCOMM_MCP_HTTP_TOKEN=... didcomm-mcp --http 0.0.0.0:8090
+```
+
+MCP host configuration for an HTTP server:
+
+```json
+{
+  "mcpServers": {
+    "didcomm": {
+      "type": "http",
+      "url": "http://localhost:8090/mcp",
+      "headers": { "Authorization": "Bearer ..." }
+    }
+  }
+}
+```
+
+### Logging
+
 It speaks MCP over stdio and logs to stderr (`RUST_LOG=debug` for more). On first start
 it creates its identity (private keys, owner-only file permissions). It then mediates
 with the configured mediator in the background, without holding up the MCP handshake.
@@ -78,6 +117,9 @@ Environment variables override the file.
 | `mediator_did` | `DIDCOMM_MCP_MEDIATOR_DID` | the Indicio public mediator | Receives messages for this agent. `""` disables mediation; replies then only arrive via `wait_for_reply`. Indicio's is for development and demos, not production. |
 | `allowed_targets` | `DIDCOMM_MCP_ALLOWED_TARGETS` (comma-separated) | any | If set, only these DIDs can be messaged or queried. |
 | `validate_messages` | `DIDCOMM_MCP_VALIDATE_MESSAGES` | `true` | Schema-check outgoing messages. |
+| `[http] bind` | `DIDCOMM_MCP_HTTP_BIND` | `127.0.0.1:8090` | Address for `--http` (`--http <address>` overrides it). |
+| `[http] auth_token` | `DIDCOMM_MCP_HTTP_TOKEN` | none | Bearer token for `--http`; required for non-loopback addresses. |
+| `[http] allowed_hosts` | `DIDCOMM_MCP_HTTP_ALLOWED_HOSTS` | loopback names | `Host` header values `--http` accepts. |
 
 ## Tests
 

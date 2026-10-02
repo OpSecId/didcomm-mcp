@@ -2,6 +2,11 @@
 #
 #   docker run -i --rm -v didcomm-mcp:/data didcomm-mcp
 #
+# or serve MCP over HTTP (a token is required for the non-loopback bind):
+#
+#   docker run --rm -p 127.0.0.1:8090:8090 -v didcomm-mcp:/data \
+#     -e DIDCOMM_MCP_HTTP_TOKEN=... didcomm-mcp --http 0.0.0.0:8090
+#
 # Optional build secrets (neither ends up in an image layer):
 #   github_token -- only if a git dependency is private (wyvrn-cloud/didcomm is public):
 #                   --secret id=github_token,env=GITHUB_TOKEN
@@ -47,5 +52,7 @@ COPY --from=builder /build/target/release/didcomm-mcp /usr/local/bin/didcomm-mcp
 # The identity lives in a volume so the agent keeps its DID across runs.
 ENV DIDCOMM_MCP_IDENTITY=/data/identity.json
 VOLUME /data
+# Only used with --http.
+EXPOSE 8090
 USER didcomm
 ENTRYPOINT ["didcomm-mcp"]
