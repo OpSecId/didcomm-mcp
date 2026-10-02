@@ -117,13 +117,18 @@ agent's *own* mediator must come from its base DID (`Agent::did_for`). Otherwise
 mediator routes its reply back into itself. Also added: a 30 s default HTTP timeout
 (`Agent::with_http_client` overrides it).
 
-### Phase 5: end-to-end test
+### Phase 5: end-to-end test -- done
 
-A `docker-compose.yml` with the documentation server, `didcomm-mediator-core` (via
-`didcomm-peer-service ROLE=mediator`), and a peer acting as "Bob". An `rmcp` client
-test drives the brief's six-step flow: discover, look up, basicmessage, protocol
-message, fetch the reply. A separate manual, non-CI smoke test runs against the
-Indicio mediator.
+`e2e/docker-compose.yml` runs the real documentation server, a mediator and a peer
+("Bob"); the mediator and Bob are both `didcomm-peer-service`. `e2e/run.py` (standard
+library Python) runs the MCP server's own container with stdin/stdout attached, as an
+MCP host would, and walks through the brief's workflow over raw MCP JSON-RPC: the
+handshake, mediation, discover, search and look up, a schema rejection, a validated
+send and its reply, a message delivered through the mediator and fetched, and a spec
+section. The MCP server also ships as a container image (`Dockerfile`).
+
+The live Indicio path is covered by hand (README) and by `didcomm-agent`'s ignored live
+test.
 
 ## Findings from probing the Indicio mediator (2026-10-01)
 

@@ -1,0 +1,48 @@
+# End-to-end stack for didcomm-mcp: a documentation registry, a mediator, and a peer
+# ("Bob"), each built from its own repository. run.py drives the MCP server against it.
+#
+# Build contexts default to sibling checkouts (../../didcomm, ../../documentation-server);
+# override with DIDCOMM_DIR / DOCSERVER_DIR. documentation-server needs its submodules
+# (git submodule update --init).
+#
+# Host ports are only for run.py to read each service's DID; the services and the MCP
+# server talk to each other over the compose network, by service name.
+
+services:
+  registry:
+    image: didcomm-e2e/documentation-server
+    build: ${DOCSERVER_DIR:-../../documentation-server}
+    command: ["config/e2e.toml"]
+    volumes:
+      - ./registry.toml:/app/config/e2e.toml:ro
+    ports: ["127.0.0.1:${REGISTRY_PORT:-18180}:8080"]
+
+  mediator:
+    image: didcomm-e2e/peer-service
+    build:
+      context: ${DIDCOMM_DIR:-../../didcomm}
+      dockerfile: crates/didcomm-peer-service/Dockerfile
+    environment:
+      ROLE: mediator
+      PEER_ENDPOINT_URI: http://mediator:8080/
+    ports: ["127.0.0.1:${MEDIATOR_PORT:-18181}:8080"]
+
+  bob:
+    image: didcomm-e2e/peer-service
+    environment:
+      ROLE: peer
+      PEER_ENDPOINT_URI: http://bob:8080/
+    ports: ["127.0.0.1:${BOB_PORT:-18182}:8080"]
+    depends_on: [mediator]
+
+  # Not started by `up`: run.py runs it with stdin/stdout attached, as an MCP host
+  # would (`docker compose run -T mcp`).
+  mcp:
+    image: didcomm-e2e/mcp
+    build: ..
+    profiles: ["mcp"]
+    environment:
+      DIDCOMM_MCP_REGISTRY_DID: ${DIDCOMM_MCP_REGISTRY_DID:-}
+      DIDCOMM_MCP_MEDIATOR_DID: ${DIDCOMM_MCP_MEDIATOR_DID:-}
+      RUST_LOG: ${RUST_LOG:-info}
+    depends_on: [registry, mediator, bob]

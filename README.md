@@ -48,6 +48,21 @@ MCP host configuration (e.g. Claude Code's `.mcp.json` or Claude Desktop's confi
 }
 ```
 
+Or as a container (`docker build -t didcomm-mcp .`; see the Dockerfile for the build
+secrets a private `didcomm` dependency or a TLS-intercepting proxy needs):
+
+```json
+{
+  "mcpServers": {
+    "didcomm": {
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "-v", "didcomm-mcp:/data",
+               "-e", "DIDCOMM_MCP_REGISTRY_DID=did:web:docs.example", "didcomm-mcp"]
+    }
+  }
+}
+```
+
 It speaks MCP over stdio and logs to stderr (`RUST_LOG=debug` for more). On first start
 it creates its identity (private keys, owner-only file permissions). It then mediates
 with the configured mediator in the background, without holding up the MCP handshake.
@@ -85,5 +100,30 @@ mediator, and messaging the agent's own mediator.
 
 It has also been verified by hand over stdio with raw MCP JSON-RPC, against the real
 documentation server and the live Indicio mediator.
+
+### End to end, in containers
+
+```sh
+e2e/run.py
+```
+
+It needs Docker with Compose, plus sibling checkouts of
+[`didcomm`](https://github.com/wyvrn-cloud/didcomm) and
+[`documentation-server`](https://github.com/wyvrn-cloud/documentation-server) (with its
+submodules). Override their locations with `DIDCOMM_DIR` / `DOCSERVER_DIR`. The script:
+1. Builds and starts `e2e/docker-compose.yml`: the real documentation server, a
+   mediator, and a peer ("Bob").
+2. Runs the MCP server's container with stdin/stdout attached, as an MCP host would.
+3. Walks through the whole workflow over raw MCP JSON-RPC:
+   - the handshake and tool list
+   - mediation
+   - discovering Bob
+   - searching and looking up `basicmessage/2.0` in the real registry
+   - a schema-rejected send, then a validated send with Bob's ack
+   - Bob messaging us through the mediator, then `fetch_messages`
+   - a spec section
+
+`--no-build` reuses already-built `didcomm-e2e/*` images. `--keep` leaves the stack
+running.
 
 See [`PLAN.md`](PLAN.md) for the design of the whole system.
