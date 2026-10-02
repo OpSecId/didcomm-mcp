@@ -2,7 +2,8 @@
 
 An [MCP](https://modelcontextprotocol.io) server that lets an AI agent discover, learn
 and use [DIDComm v2](https://identity.foundation/didcomm-messaging/spec/v2.1/)
-protocols with any DIDComm agent. All encryption, keys, DID resolution, mediation and
+protocols with any DIDComm agent, and DIDComm v1 (Aries) protocols over connections
+made from out-of-band invitations and DID Exchange. All encryption, keys, DID resolution, mediation and
 transport stay inside this server; the AI only ever sees plaintext JSON.
 
 The registry is asked in [`documentation/1.1`](https://github.com/wyvrn-cloud/protocols/blob/master/protocols/documentation/1.1/readme.md),
@@ -16,13 +17,16 @@ it needs it, then sends that protocol's messages through `send_didcomm_message`.
 
 | Tool | What it does |
 |---|---|
-| `get_identity` | This agent's DID (give it to peers), its mediation status, and the configured registry. |
+| `get_identity` | This agent's DID (give it to peers), its mediation status, the configured registry, and its DIDComm v1 DID and mediation. |
 | `discover_features` | Asks a peer which protocols it supports (`discover-features/2.0`). |
 | `search_protocols` | Searches the registry's protocol catalog by URI pattern, text, status, tag or DIDComm version (`didcomm_version`: `2.1`, `1.0`). |
 | `lookup_protocol_documentation` | One protocol's definition: roles, the DIDComm versions it's used with, the sections you ask for, message types with examples and JSON Schemas (one per DIDComm version). |
 | `lookup_spec` | A document's table of contents or one section: the DIDComm Messaging spec (`2.1`, `2.0`, `editors-draft`, and `1.0`, DIDComm v1 as the Aries RFCs define it), or another `document` the registry lists, such as `extension/l10n`. |
-| `send_didcomm_message` | Sends a DIDComm v2 message (you give `type` and `body`; `id`, `from`, `to` and `created_time` are filled in). It's validated against the registry's DIDComm v2 schema first, when there is one; a type the registry lists for DIDComm v1 only is refused. With `wait_for_reply`, it returns the reply received on the same connection. |
-| `fetch_messages` | Collects messages queued at this agent's mediator, and answers trust-pings and feature queries among them. |
+| `send_didcomm_message` | Sends a message to a DID or a connection (you give `type` and `body`; the headers are filled in). DIDComm v1 to a v1 connection, or when the registry lists the type for DIDComm v1 alone (then the `body` holds the message's own fields, next to `@type`, `@id`, `~thread`); DIDComm v2 otherwise. It's validated against the registry's schema for that DIDComm version first, when there is one. With `wait_for_reply`, it returns the reply received on the same connection. |
+| `fetch_messages` | Collects messages queued at this agent's mediators (v2 and v1), takes DID Exchange handshakes among them a step further, and answers trust-pings and feature queries. |
+| `accept_invitation` | Connects through an out-of-band invitation (URL or JSON): DID Exchange 1.1/1.0 for a v1 one; an OOB 2.0 one becomes a connection to the inviter's DID. |
+| `create_invitation` | An out-of-band invitation (and URL) for other agents to connect to this one over DIDComm v1. Needs the v1 mediator. |
+| `list_connections` | The connections: id (usable as `target_did`), state, role, DIDComm version, the peer's label and DID. |
 
 Everything that came from a peer or the registry is returned behind an
 **UNTRUSTED CONTENT** marker. It's third-party text that lands in the model's context,
@@ -105,7 +109,10 @@ MCP host configuration for an HTTP server:
 
 It speaks MCP over stdio and logs to stderr (`RUST_LOG=debug` for more). On first start
 it creates its identity (private keys, owner-only file permissions). It then mediates
-with the configured mediator in the background, without holding up the MCP handshake.
+with the configured mediator in the background, without holding up the MCP handshake,
+and then with the DIDComm v1 mediator: it connects to it with DID Exchange and asks for
+coordinate-mediation/1.0, so v1 peers can reach it too. Connections and the v1 mediation
+are kept in a state file next to the identity.
 
 ## Configuration
 
@@ -118,7 +125,9 @@ Environment variables override the file.
 | `identity_path` | `DIDCOMM_MCP_IDENTITY` | `~/.local/share/didcomm-mcp/identity.json` | This agent's keys. Keep the file to keep the DID. |
 | `registry_did` | `DIDCOMM_MCP_REGISTRY_DID` | `did:web:docs.wyvrn.app` | The [documentation registry](https://github.com/wyvrn-cloud/documentation-server). `""` disables it: the lookup tools then report that none is configured, and sends skip validation. |
 | `mediator_did` | `DIDCOMM_MCP_MEDIATOR_DID` | the Indicio public mediator | Receives messages for this agent. `""` disables mediation; replies then only arrive via `wait_for_reply`. Indicio's is for development and demos, not production. |
-| `allowed_targets` | `DIDCOMM_MCP_ALLOWED_TARGETS` (comma-separated) | any | If set, only these DIDs can be messaged or queried. |
+| `v1_mediator` | `DIDCOMM_MCP_V1_MEDIATOR` | `mediator_did` | The DIDComm v1 mediator: a DID (connected to through an implicit invitation, as the Indicio public mediator accepts) or an out-of-band invitation URL. `""` disables it; v1 peers can then only answer on the same connection, and `create_invitation` is unavailable. |
+| `state_path` | `DIDCOMM_MCP_STATE` | `connections.json` next to the identity | Connections, created invitations and the v1 mediation. |
+| `allowed_targets` | `DIDCOMM_MCP_ALLOWED_TARGETS` (comma-separated) | any | If set, only these DIDs (and connections with them) can be messaged or queried, and only invitations naming one can be accepted. |
 | `validate_messages` | `DIDCOMM_MCP_VALIDATE_MESSAGES` | `true` | Schema-check outgoing messages. |
 | `[http] bind` | `DIDCOMM_MCP_HTTP_BIND` | `127.0.0.1:8090` | Address for `--http` (`--http <address>` overrides it). |
 | `[http] auth_token` | `DIDCOMM_MCP_HTTP_TOKEN` | none | Bearer token for `--http`; required for non-loopback addresses. |
@@ -139,7 +148,13 @@ stand-in documentation registry, and a peer. It runs the brief's workflow end to
 - a request with its reply on the same connection
 
 It also covers problem reports, `allowed_targets`, running without a registry or
-mediator, and messaging the agent's own mediator.
+mediator, and messaging the agent's own mediator. For DIDComm v1, a v1 peer and a v1
+mediator join them:
+- accepting an invitation URL (DID Exchange), then v1 sends validated against the v1
+  schema, with the reply on the connection
+- creating an invitation behind the v1 mediator; the peer's request, our response and
+  its completion through `fetch_messages`; a v1 message through the mediator
+- connections and the v1 mediation surviving a restart
 
 It has also been verified by hand over stdio with raw MCP JSON-RPC, against the real
 documentation server and the live Indicio mediator.

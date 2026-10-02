@@ -135,7 +135,7 @@ def main():
         mcp.rpc("notifications/initialized", notify=True)
         check(init["serverInfo"]["name"] == "didcomm-mcp", "server identifies as didcomm-mcp")
         tools = sorted(t["name"] for t in mcp.rpc("tools/list")["tools"])
-        check(len(tools) == 7, f"7 tools: {tools}")
+        check(len(tools) == 10, f"10 tools: {tools}")
 
         step("get_identity")
         _, _, identity = mcp.tool("get_identity", {})
@@ -193,7 +193,7 @@ def main():
               ping["message"]["body"].get("didcomm_versions"))
         err, texts, _ = mcp.tool("send_didcomm_message",
                                  {"target_did": bob, "type": "https://didcomm.org/trust_ping/1.0/ping", "body": {}})
-        check(err and "DIDComm v1" in texts[0], "sending a DIDComm v1 type is refused", texts)
+        check(err and "no DIDComm v1 service" in texts[0], "a DIDComm v1 type goes out as v1: Bob (v2 only) can't take it", texts)
         err, _, l10n = mcp.tool("lookup_spec", {"document": "extension/l10n", "section": "scope"})
         check("accept-lang" in l10n["message"]["body"]["section"]["markdown"], "the l10n extension")
         err, _, rfc = mcp.tool("lookup_spec", {"version": "1.0", "section": "rfc0008"})

@@ -14,13 +14,18 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::bridge::{received_json, Bridge, BridgeError, Outgoing};
+use crate::bridge::{connection_json, Bridge, BridgeError, Outgoing};
 
 const INSTRUCTIONS: &str = "\
-Talk to DIDComm v2 agents. Messages are end-to-end encrypted and authenticated by this \
-server; you only handle plaintext JSON. The registry also documents DIDComm v1 (Aries) \
-protocols; each protocol and message type says which DIDComm versions it is used with \
-(didcomm_versions, e.g. ^1.0 or ^2.0), and only DIDComm v2 ones can be sent from here.
+Talk to DIDComm agents, v2 and v1 (Aries). Messages are end-to-end encrypted and \
+authenticated by this server; you only handle plaintext JSON. Each protocol and message \
+type in the registry says which DIDComm versions it is used with (didcomm_versions, e.g. \
+^1.0 or ^2.0).
+
+DIDComm v2 peers are addressed by DID. DIDComm v1 peers are reached through connections: \
+accept_invitation takes an out-of-band invitation (URL or JSON) and connects with DID \
+Exchange; create_invitation makes one for a peer to accept; list_connections shows them. \
+send_didcomm_message to a connection id sends in that connection's DIDComm version.
 
 Typical workflow:
 1. discover_features on the peer's DID to see which protocols (PIURIs) it supports.
@@ -111,13 +116,32 @@ pub struct LookupSpecArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct AcceptInvitationArgs {
+    /// The out-of-band invitation: a URL (with an `oob` or `c_i` parameter, or a short
+    /// link to one) or its JSON.
+    pub invitation: String,
+    /// How this agent introduces itself to the inviter (default `didcomm-mcp`).
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateInvitationArgs {
+    /// How this agent introduces itself to whoever accepts (default `didcomm-mcp`).
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendMessageArgs {
-    /// The recipient's DID.
+    /// The recipient: a DID, or a connection id (see list_connections).
     pub target_did: String,
     /// The full message type URI, e.g. `https://didcomm.org/basicmessage/2.0/message`.
     #[serde(rename = "type")]
     pub message_type: String,
-    /// The message body, as the protocol's documentation and schema define it.
+    /// The message body, as the protocol's documentation and schema define it. For a
+    /// DIDComm v1 message: the message's own fields (everything except `@type`, `@id`,
+    /// `~thread` and `~attach`, which are filled in from the other arguments).
     pub body: Value,
     /// Thread id, to continue an existing thread: the id of the message that started it.
     #[serde(default)]
@@ -125,7 +149,7 @@ pub struct SendMessageArgs {
     /// Parent thread id, e.g. an out-of-band invitation's id when answering it.
     #[serde(default)]
     pub pthid: Option<String>,
-    /// DIDComm attachments, if the protocol uses them.
+    /// DIDComm attachments, if the protocol uses them (v1: the `~attach` decorator).
     #[serde(default)]
     pub attachments: Option<Value>,
     /// Wait for the recipient's reply on the same connection (return_route) and return
@@ -173,11 +197,11 @@ fn failure(error: BridgeError) -> CallToolResult {
 }
 
 /// The reply body as tool output, attributed to its sender.
-fn reply_result(result: Result<Received, BridgeError>) -> CallToolResult {
+fn reply_result(bridge: &Bridge, result: Result<Received, BridgeError>) -> CallToolResult {
     match result {
         Ok(reply) => {
             let source = reply.sender.clone().unwrap_or_else(|| "an anonymous sender".into());
-            untrusted(&source, &received_json(&reply))
+            untrusted(&source, &bridge.received_json(&reply))
         }
         Err(e) => failure(e),
     }
@@ -202,7 +226,7 @@ impl DidcommMcp {
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn discover_features(&self, Parameters(args): Parameters<DiscoverFeaturesArgs>) -> Result<CallToolResult, ErrorData> {
-        Ok(reply_result(self.bridge.discover_features(&args.target_did, args.pattern.as_deref()).await))
+        Ok(reply_result(&self.bridge, self.bridge.discover_features(&args.target_did, args.pattern.as_deref()).await))
     }
 
     #[tool(
@@ -224,7 +248,7 @@ impl DidcommMcp {
                 body[key] = value;
             }
         }
-        Ok(reply_result(self.bridge.search_protocols(body).await))
+        Ok(reply_result(&self.bridge, self.bridge.search_protocols(body).await))
     }
 
     #[tool(
@@ -236,7 +260,7 @@ impl DidcommMcp {
             .bridge
             .lookup_protocol(&args.protocol_uri, args.sections, args.include_messages.unwrap_or(true))
             .await;
-        Ok(reply_result(result))
+        Ok(reply_result(&self.bridge, result))
     }
 
     #[tool(
@@ -248,11 +272,11 @@ impl DidcommMcp {
             .bridge
             .lookup_spec(args.document.as_deref(), args.version.as_deref(), args.section.as_deref())
             .await;
-        Ok(reply_result(result))
+        Ok(reply_result(&self.bridge, result))
     }
 
     #[tool(
-        description = "Send a DIDComm message: encrypted to the recipient, authenticated as this agent, and delivered over HTTP(S), through the recipient's mediator if it has one. You give the type and body; id, from, to and created_time are filled in. Checked against the registry's JSON Schema for the type first, if it has one. DIDComm v2 only: message types the registry lists for DIDComm v1 alone are refused.",
+        description = "Send a DIDComm message: encrypted to the recipient, authenticated as this agent, and delivered over HTTP(S), through the recipient's mediator if it has one. You give the type and body; the headers (v2: id, from, to, created_time; v1: @id, ~thread) are filled in. Sent as DIDComm v1 to a v1 connection, or when the registry lists the type for DIDComm v1 alone; v2 otherwise. Checked against the registry's JSON Schema for the type and DIDComm version first, if it has one.",
         annotations(read_only_hint = false, destructive_hint = false, open_world_hint = true)
     )]
     async fn send_didcomm_message(&self, Parameters(args): Parameters<SendMessageArgs>) -> Result<CallToolResult, ErrorData> {
@@ -275,7 +299,7 @@ impl DidcommMcp {
     }
 
     #[tool(
-        description = "Collect messages other agents sent to this agent's DID, queued at its mediator. Returns each message with its authenticated sender. Collected messages are removed from the queue. Trust pings and feature queries among them are answered automatically.",
+        description = "Collect messages other agents sent to this agent, queued at its mediators (DIDComm v2 and v1). Returns each message with its authenticated sender and DIDComm version. Collected messages are removed from the queue. Connection handshakes (DID Exchange), trust pings and feature queries among them are handled automatically.",
         annotations(read_only_hint = false, destructive_hint = false, open_world_hint = true)
     )]
     async fn fetch_messages(&self, Parameters(args): Parameters<FetchMessagesArgs>) -> Result<CallToolResult, ErrorData> {
@@ -284,6 +308,36 @@ impl DidcommMcp {
             Ok(result) => untrusted("the senders listed in each message's `from`", &result),
             Err(e) => failure(e),
         })
+    }
+
+    #[tool(
+        description = "Connect to an agent through its out-of-band invitation (URL or JSON). For a DIDComm v1 (Aries) invitation this runs DID Exchange and returns the connection; use its id as target_did in send_didcomm_message. An OOB 2.0 invitation becomes a connection to the inviter's DID.",
+        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = true)
+    )]
+    async fn accept_invitation(&self, Parameters(args): Parameters<AcceptInvitationArgs>) -> Result<CallToolResult, ErrorData> {
+        Ok(match self.bridge.accept_invitation(&args.invitation, args.label.as_deref()).await {
+            Ok(connection) => untrusted("the inviter (its label and DID)", &connection_json(&connection)),
+            Err(e) => failure(e),
+        })
+    }
+
+    #[tool(
+        description = "Create an out-of-band invitation (DIDComm v1, DID Exchange 1.1/1.0) for another agent to connect to this one. Returns the invitation and an invitation URL to hand over. Requests to it arrive through the v1 mediator: fetch_messages completes the connections.",
+        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = true)
+    )]
+    async fn create_invitation(&self, Parameters(args): Parameters<CreateInvitationArgs>) -> Result<CallToolResult, ErrorData> {
+        Ok(match self.bridge.create_invitation(args.label.as_deref()).await {
+            Ok(result) => CallToolResult::success(vec![json_block(&result)]),
+            Err(e) => failure(e),
+        })
+    }
+
+    #[tool(
+        description = "This agent's connections: id (use as target_did), state, role, DIDComm version, handshake protocol, and the peer's label and DID.",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_connections(&self) -> Result<CallToolResult, ErrorData> {
+        Ok(untrusted("the peers (their labels)", &json!({"connections": self.bridge.connections()})))
     }
 }
 

@@ -242,6 +242,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-tungstenite"
+version = "0.32.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8acc405d38be14342132609f06f02acaf825ddccfe76c4824a69281e0458ebd4"
+dependencies = [
+ "atomic-waker",
+ "futures-core",
+ "futures-io",
+ "futures-task",
+ "futures-util",
+ "log",
+ "pin-project-lite",
+ "tungstenite",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -992,14 +1008,19 @@ dependencies = [
 [[package]]
 name = "didcomm-agent"
 version = "0.0.1"
-source = "git+https://github.com/wyvrn-cloud/didcomm#fbb4b8003bae3b236b8fdb902b0e9e59c24f182b"
+source = "git+https://github.com/wyvrn-cloud/didcomm#d59dec902c054e7acc1e16e144d0623b651b8afe"
 dependencies = [
  "askar-crypto",
+ "base64 0.22.1",
  "didcomm-core",
  "didcomm-crypto-askar",
  "didcomm-multiformats",
  "didcomm-quickstart",
+ "didcomm-resolver-peer",
+ "didcomm-v1",
+ "futures-util",
  "reqwest",
+ "reqwest-websocket",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -1009,7 +1030,7 @@ dependencies = [
 [[package]]
 name = "didcomm-core"
 version = "0.0.1"
-source = "git+https://github.com/wyvrn-cloud/didcomm#fbb4b8003bae3b236b8fdb902b0e9e59c24f182b"
+source = "git+https://github.com/wyvrn-cloud/didcomm#d59dec902c054e7acc1e16e144d0623b651b8afe"
 dependencies = [
  "async-trait",
  "ciborium",
@@ -1026,7 +1047,7 @@ dependencies = [
 [[package]]
 name = "didcomm-crypto-askar"
 version = "0.0.1"
-source = "git+https://github.com/wyvrn-cloud/didcomm#fbb4b8003bae3b236b8fdb902b0e9e59c24f182b"
+source = "git+https://github.com/wyvrn-cloud/didcomm#d59dec902c054e7acc1e16e144d0623b651b8afe"
 dependencies = [
  "askar-crypto",
  "async-trait",
@@ -1041,7 +1062,7 @@ dependencies = [
 [[package]]
 name = "didcomm-diddoc"
 version = "0.0.1"
-source = "git+https://github.com/wyvrn-cloud/didcomm#fbb4b8003bae3b236b8fdb902b0e9e59c24f182b"
+source = "git+https://github.com/wyvrn-cloud/didcomm#d59dec902c054e7acc1e16e144d0623b651b8afe"
 dependencies = [
  "serde",
  "serde_json",
@@ -1054,6 +1075,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "didcomm-agent",
  "didcomm-mediator-core",
  "didcomm-quickstart",
@@ -1075,7 +1097,7 @@ dependencies = [
 [[package]]
 name = "didcomm-mediator-core"
 version = "0.0.1"
-source = "git+https://github.com/wyvrn-cloud/didcomm#fbb4b8003bae3b236b8fdb902b0e9e59c24f182b"
+source = "git+https://github.com/wyvrn-cloud/didcomm#d59dec902c054e7acc1e16e144d0623b651b8afe"
 dependencies = [
  "async-trait",
  "didcomm-core",
@@ -1088,7 +1110,7 @@ dependencies = [
 [[package]]
 name = "didcomm-multiformats"
 version = "0.0.1"
-source = "git+https://github.com/wyvrn-cloud/didcomm#fbb4b8003bae3b236b8fdb902b0e9e59c24f182b"
+source = "git+https://github.com/wyvrn-cloud/didcomm#d59dec902c054e7acc1e16e144d0623b651b8afe"
 dependencies = [
  "multibase",
  "thiserror 1.0.69",
@@ -1097,7 +1119,7 @@ dependencies = [
 [[package]]
 name = "didcomm-quickstart"
 version = "0.0.1"
-source = "git+https://github.com/wyvrn-cloud/didcomm#fbb4b8003bae3b236b8fdb902b0e9e59c24f182b"
+source = "git+https://github.com/wyvrn-cloud/didcomm#d59dec902c054e7acc1e16e144d0623b651b8afe"
 dependencies = [
  "askar-crypto",
  "didcomm-core",
@@ -1105,6 +1127,7 @@ dependencies = [
  "didcomm-diddoc",
  "didcomm-multiformats",
  "didcomm-resolver-jwk",
+ "didcomm-resolver-key",
  "didcomm-resolver-peer",
  "didcomm-resolver-web",
  "didcomm-resolver-webvh",
@@ -1115,7 +1138,19 @@ dependencies = [
 [[package]]
 name = "didcomm-resolver-jwk"
 version = "0.0.1"
-source = "git+https://github.com/wyvrn-cloud/didcomm#fbb4b8003bae3b236b8fdb902b0e9e59c24f182b"
+source = "git+https://github.com/wyvrn-cloud/didcomm#d59dec902c054e7acc1e16e144d0623b651b8afe"
+dependencies = [
+ "async-trait",
+ "didcomm-core",
+ "didcomm-multiformats",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "didcomm-resolver-key"
+version = "0.0.1"
+source = "git+https://github.com/wyvrn-cloud/didcomm#d59dec902c054e7acc1e16e144d0623b651b8afe"
 dependencies = [
  "async-trait",
  "didcomm-core",
@@ -1127,7 +1162,7 @@ dependencies = [
 [[package]]
 name = "didcomm-resolver-peer"
 version = "0.0.1"
-source = "git+https://github.com/wyvrn-cloud/didcomm#fbb4b8003bae3b236b8fdb902b0e9e59c24f182b"
+source = "git+https://github.com/wyvrn-cloud/didcomm#d59dec902c054e7acc1e16e144d0623b651b8afe"
 dependencies = [
  "async-trait",
  "didcomm-core",
@@ -1140,7 +1175,7 @@ dependencies = [
 [[package]]
 name = "didcomm-resolver-web"
 version = "0.0.1"
-source = "git+https://github.com/wyvrn-cloud/didcomm#fbb4b8003bae3b236b8fdb902b0e9e59c24f182b"
+source = "git+https://github.com/wyvrn-cloud/didcomm#d59dec902c054e7acc1e16e144d0623b651b8afe"
 dependencies = [
  "async-trait",
  "didcomm-core",
@@ -1153,13 +1188,27 @@ dependencies = [
 [[package]]
 name = "didcomm-resolver-webvh"
 version = "0.0.1"
-source = "git+https://github.com/wyvrn-cloud/didcomm#fbb4b8003bae3b236b8fdb902b0e9e59c24f182b"
+source = "git+https://github.com/wyvrn-cloud/didcomm#d59dec902c054e7acc1e16e144d0623b651b8afe"
 dependencies = [
  "async-trait",
  "didcomm-core",
  "didwebvh-rs",
  "serde_json",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "didcomm-v1"
+version = "0.0.1"
+source = "git+https://github.com/wyvrn-cloud/didcomm#d59dec902c054e7acc1e16e144d0623b651b8afe"
+dependencies = [
+ "askar-crypto",
+ "didcomm-core",
+ "didcomm-diddoc",
+ "didcomm-multiformats",
+ "serde_json",
+ "thiserror 1.0.69",
+ "uuid",
 ]
 
 [[package]]
@@ -1387,7 +1436,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2759,8 +2808,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
 dependencies = [
  "libc",
- "rand_chacha",
+ "rand_chacha 0.3.1",
  "rand_core 0.6.4",
+]
+
+[[package]]
+name = "rand"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9ef1d0d795eb7d84685bca4f72f3649f064e6641543d3a8c415898726a57b41"
+dependencies = [
+ "rand_chacha 0.9.0",
+ "rand_core 0.9.5",
 ]
 
 [[package]]
@@ -2785,12 +2844,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "rand_chacha"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
+dependencies = [
+ "ppv-lite86",
+ "rand_core 0.9.5",
+]
+
+[[package]]
 name = "rand_core"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom 0.2.17",
+]
+
+[[package]]
+name = "rand_core"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
+dependencies = [
+ "getrandom 0.3.4",
 ]
 
 [[package]]
@@ -2920,6 +2998,24 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-streams",
+ "web-sys",
+]
+
+[[package]]
+name = "reqwest-websocket"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7705b649c3b66b85c4e9c304a6898b1ae3eecb880c474720ebf925e4a932ae02"
+dependencies = [
+ "async-tungstenite",
+ "bytes",
+ "futures-util",
+ "reqwest",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tungstenite",
  "web-sys",
 ]
 
@@ -3390,6 +3486,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3749,6 +3856,7 @@ checksum = "494815d09bf52b5548659851081238f0ca39ff638363907596da739561c62c52"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "libc",
  "pin-project-lite",
@@ -3911,6 +4019,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
+name = "tungstenite"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8628dcc84e5a09eb3d8423d6cb682965dea9133204e8fb3efee74c2a0c259442"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.9.5",
+ "sha1",
+ "thiserror 2.0.21",
+ "utf-8",
+]
+
+[[package]]
 name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3956,6 +4081,12 @@ dependencies = [
  "serde",
  "serde_derive",
 ]
+
+[[package]]
+name = "utf-8"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09cc8ee72d2a9becf2f2febe0205bbed8fc6615b7cb429ad062dc7b7ddd036a9"
 
 [[package]]
 name = "utf8_iter"

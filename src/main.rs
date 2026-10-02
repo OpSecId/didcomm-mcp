@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
-use didcomm_agent::{Agent, Identity};
+use didcomm_agent::{Agent, Features, Identity};
 use didcomm_mcp::{bridge::Bridge, config::Config, server::DidcommMcp};
 use rmcp::ServiceExt;
 
@@ -58,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let identity = Identity::load_or_generate(&config.identity_path)
         .with_context(|| format!("identity file {}", config.identity_path.display()))?;
-    let bridge = Arc::new(Bridge::new(Agent::new(identity)?, config));
+    let bridge = Arc::new(Bridge::new(Agent::new(identity)?.with_features(Features::standard().with_v1()), config));
     tracing::info!(did = %bridge.agent().base_did(), "didcomm-mcp starting");
 
     // Mediate in the background so the MCP handshake isn't held up by the network;
@@ -67,6 +67,11 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         match background.ensure_mediation().await {
             Ok(m) => tracing::info!(did = %m.did, mediator = %m.mediator_did, "mediated"),
+            Err(e) => tracing::warn!("{e}"),
+        }
+        match background.ensure_v1_mediation().await {
+            Ok(m) => tracing::info!(did = %background.agent().v1_did(), endpoint = %m.endpoint, "mediated for DIDComm v1"),
+            Err(didcomm_mcp::bridge::BridgeError::NoV1Mediator) => {}
             Err(e) => tracing::warn!("{e}"),
         }
     });

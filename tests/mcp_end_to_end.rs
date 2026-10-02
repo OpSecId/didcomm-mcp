@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{body::Bytes, extract::State, http::StatusCode, routing::post, Router};
+use base64::Engine as _;
+use didcomm_agent::v1::normalize_type;
 use didcomm_agent::{features, Agent, Features, Identity, Received};
 use didcomm_mcp::{bridge::Bridge, config::Config, server::DidcommMcp};
 use didcomm_mediator_core::MediatorService;
@@ -183,6 +185,8 @@ struct World {
     client: RunningService<RoleClient, TestClient>,
     bob: Arc<Agent>,
     registry: Arc<Agent>,
+    config: Config,
+    identity: Identity,
 }
 
 async fn world(customize: impl FnOnce(&mut Config)) -> World {
@@ -198,26 +202,41 @@ async fn world_with(registry_answers: fn(&Received) -> Option<Value>, customize:
         identity_path: PathBuf::from("unused"),
         registry_did: Some(registry.did()),
         mediator_did: Some(mediator),
+        v1_mediator: None,
+        state_path: temp_state_path(),
         allowed_targets: None,
         validate_messages: true,
         http: Default::default(),
     };
     customize(&mut config);
-    let bridge = Arc::new(Bridge::new(Agent::new(Identity::generate().unwrap()).unwrap(), config));
+    let identity = Identity::generate().unwrap();
+    let client = serve(identity.clone(), config.clone()).await;
+    World { client, bob, registry, config, identity }
+}
 
+/// An MCP client connected to a fresh server with `identity` and `config`.
+async fn serve(identity: Identity, config: Config) -> RunningService<RoleClient, TestClient> {
+    let bridge = Arc::new(Bridge::new(Agent::new(identity).unwrap(), config));
     let (server_io, client_io) = tokio::io::duplex(1 << 20);
     tokio::spawn(async move { DidcommMcp::new(bridge).serve(server_io).await.unwrap().waiting().await });
-    let client = TestClient.serve(client_io).await.unwrap();
-    World { client, bob, registry }
+    TestClient.serve(client_io).await.unwrap()
+}
+
+fn temp_state_path() -> PathBuf {
+    std::env::temp_dir().join(format!("didcomm-mcp-test-{}.json", uuid::Uuid::new_v4()))
 }
 
 impl World {
     async fn call(&self, tool: &str, arguments: Value) -> CallToolResult {
-        self.client
-            .call_tool(CallToolRequestParams::new(tool.to_string()).with_arguments(arguments.as_object().unwrap().clone()))
-            .await
-            .unwrap()
+        call(&self.client, tool, arguments).await
     }
+}
+
+async fn call(client: &RunningService<RoleClient, TestClient>, tool: &str, arguments: Value) -> CallToolResult {
+    client
+        .call_tool(CallToolRequestParams::new(tool.to_string()).with_arguments(arguments.as_object().unwrap().clone()))
+        .await
+        .unwrap()
 }
 
 fn texts(result: &CallToolResult) -> Vec<String> {
@@ -240,9 +259,12 @@ async fn exposes_the_fixed_tool_set() {
     let mut names: Vec<String> = world.client.list_tools(None).await.unwrap().tools.into_iter().map(|t| t.name.to_string()).collect();
     names.sort();
     assert_eq!(names, [
+        "accept_invitation",
+        "create_invitation",
         "discover_features",
         "fetch_messages",
         "get_identity",
+        "list_connections",
         "lookup_protocol_documentation",
         "lookup_spec",
         "search_protocols",
@@ -378,16 +400,16 @@ async fn works_without_a_registry_or_mediator() {
 }
 
 #[tokio::test]
-async fn didcomm_v1_message_types_are_refused() {
+async fn a_v1_type_to_a_did_without_a_v1_service_fails() {
     let world = world(|_| {}).await;
 
     let refused = world
-        .call("send_didcomm_message", json!({"target_did": world.bob.did(), "type": BASICMESSAGE_V1, "body": {}}))
+        .call("send_didcomm_message", json!({"target_did": world.bob.did(), "type": BASICMESSAGE_V1, "body": {"content": "x"}}))
         .await;
 
     assert_eq!(refused.is_error, Some(true));
     let text = &texts(&refused)[0];
-    assert!(text.contains("DIDComm v1 message type") && text.contains("^1.0"), "{text}");
+    assert!(text.contains("no DIDComm v1 service"), "{text}");
 }
 
 #[tokio::test]
@@ -425,5 +447,178 @@ async fn a_documentation_1_0_registry_still_works() {
         "send_didcomm_message",
         json!({"target_did": bob, "type": BASICMESSAGE_V1, "body": {}, "wait_for_reply": false}),
     ).await);
-    assert_eq!(v1["validation"], "skipped: the registry has no schema for this message type");
+    assert_eq!(v1["validation"], "skipped: the registry has no DIDComm v2 schema for this message type");
+}
+
+// DIDComm v1: connections through out-of-band invitations and DID Exchange.
+
+/// What a v1 agent does with a message: DID Exchange, auto-replies, and acking
+/// basicmessage/1.0 (`ack: <content>`, unless it is an ack).
+async fn v1_react(agent: &Agent, received: &Received) -> Option<Value> {
+    if Agent::is_connection_message(received) {
+        return agent.handle_connection_message(received).await.unwrap();
+    }
+    if let Some(reply) = agent.auto_reply(received) {
+        return Some(reply);
+    }
+    let content = received.message["content"].as_str().unwrap_or_default();
+    (normalize_type(received.message_type()) == BASICMESSAGE_V1 && !content.starts_with("ack: "))
+        .then(|| received.reply(BASICMESSAGE_V1, json!({"content": format!("ack: {content}"), "sent_time": "2026-10-02T00:00:00Z"})))
+}
+
+/// A v1 agent ("Carol"), directly reachable over HTTP.
+async fn start_carol() -> Arc<Agent> {
+    let (listener, endpoint) = listener().await;
+    let carol = Arc::new(
+        Agent::with_endpoint(Identity::generate().unwrap(), &endpoint).unwrap().with_features(Features::standard().with_v1()),
+    );
+    let handler = |State(agent): State<Arc<Agent>>, body: Bytes| async move {
+        let received = agent.receive(&body).await.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        let Some(reply) = v1_react(&agent, &received).await else {
+            return Ok(Vec::new());
+        };
+        let packed = agent.respond(&received, &reply).await.map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+        Ok::<_, (StatusCode, String)>(packed.unwrap_or_default())
+    };
+    let app = Router::new().route("/", post(handler)).with_state(carol.clone());
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    carol
+}
+
+#[tokio::test]
+async fn a_v1_connection_from_an_invitation_url() {
+    let world = world(|_| {}).await;
+    let carol = start_carol().await;
+    let url = Agent::invitation_url("https://carol.example/", &carol.create_invitation("Carol").unwrap());
+
+    let accepted = world.call("accept_invitation", json!({"invitation": url, "label": "Claude"})).await;
+    assert!(is_untrusted(&accepted), "the inviter's label is third-party content");
+    let connection = data(&accepted);
+    assert_eq!(connection["state"], "completed");
+    assert_eq!(connection["didcomm_version"], "v1");
+    assert_eq!(connection["their_label"], "Carol");
+    assert_eq!(carol.connections()[0].their_label.as_deref(), Some("Claude"));
+    let id = connection["id"].as_str().unwrap().to_string();
+
+    let listed = data(&world.call("list_connections", json!({})).await);
+    assert_eq!(listed["connections"][0]["id"], id.as_str());
+
+    // A v1 message to the connection, validated against the v1 schema.
+    let sent = data(&world.call(
+        "send_didcomm_message",
+        json!({"target_did": id, "type": BASICMESSAGE_V1, "body": {"content": "hi", "sent_time": "2026-10-02T00:00:00Z"}, "wait_for_reply": true}),
+    ).await);
+    assert_eq!(sent["sent"]["didcomm_version"], "v1");
+    assert_eq!(sent["validation"], "passed");
+    assert_eq!(sent["reply"]["didcomm_version"], "v1");
+    assert_eq!(sent["reply"]["connection"], id.as_str());
+    assert_eq!(sent["reply"]["message"]["content"], "ack: hi");
+
+    let invalid = world.call("send_didcomm_message", json!({"target_did": id, "type": BASICMESSAGE_V1, "body": {}})).await;
+    assert_eq!(invalid.is_error, Some(true));
+    assert!(texts(&invalid)[0].contains("content"), "{:?}", texts(&invalid));
+
+    // A v2-only type doesn't go over a v1 connection.
+    let wrong = world.call("send_didcomm_message", json!({"target_did": id, "type": BASICMESSAGE, "body": {"content": "x"}})).await;
+    assert_eq!(wrong.is_error, Some(true));
+    assert!(texts(&wrong)[0].contains("DIDComm v1 connection"), "{:?}", texts(&wrong));
+}
+
+/// A v1 mediator: an agent that connects, grants mediation, queues forwarded messages
+/// and delivers them through messagepickup/2.0.
+struct V1Mediator {
+    agent: Agent,
+    queue: std::sync::Mutex<Vec<(String, Value)>>,
+}
+
+async fn start_v1_mediator() -> Arc<V1Mediator> {
+    let (listener, endpoint) = listener().await;
+    let mediator = Arc::new(V1Mediator {
+        agent: Agent::with_endpoint(Identity::generate().unwrap(), &endpoint).unwrap(),
+        queue: Default::default(),
+    });
+    let handler = |State(m): State<Arc<V1Mediator>>, body: Bytes| async move {
+        let received = m.agent.receive(&body).await.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        let reply = match normalize_type(received.message_type()).as_str() {
+            "https://didcomm.org/routing/1.0/forward" => {
+                m.queue.lock().unwrap().push((uuid::Uuid::new_v4().to_string(), received.message["msg"].clone()));
+                None
+            }
+            "https://didcomm.org/coordinate-mediation/1.0/mediate-request" => Some(received.reply(
+                "https://didcomm.org/coordinate-mediation/1.0/mediate-grant",
+                json!({"endpoint": m.agent.endpoint(), "routing_keys": [m.agent.v1_did_key()]}),
+            )),
+            "https://didcomm.org/coordinate-mediation/1.0/keylist-update" => {
+                let updated: Vec<Value> = received.message["updates"].as_array().unwrap().iter()
+                    .map(|u| json!({"recipient_key": u["recipient_key"], "action": u["action"], "result": "success"}))
+                    .collect();
+                Some(received.reply("https://didcomm.org/coordinate-mediation/1.0/keylist-update-response", json!({"updated": updated})))
+            }
+            "https://didcomm.org/messagepickup/2.0/delivery-request" => {
+                let queue = m.queue.lock().unwrap();
+                Some(if queue.is_empty() {
+                    received.reply("https://didcomm.org/messagepickup/2.0/status", json!({"message_count": 0}))
+                } else {
+                    let attachments: Vec<Value> = queue.iter()
+                        .map(|(id, msg)| json!({"@id": id, "data": {"base64": base64::engine::general_purpose::STANDARD.encode(msg.to_string())}}))
+                        .collect();
+                    received.reply("https://didcomm.org/messagepickup/2.0/delivery", json!({"~attach": attachments}))
+                })
+            }
+            "https://didcomm.org/messagepickup/2.0/messages-received" => {
+                let ids: Vec<String> = received.message["message_id_list"].as_array().unwrap().iter().filter_map(|i| i.as_str().map(str::to_string)).collect();
+                let mut queue = m.queue.lock().unwrap();
+                queue.retain(|(id, _)| !ids.contains(id));
+                Some(received.reply("https://didcomm.org/messagepickup/2.0/status", json!({"message_count": queue.len()})))
+            }
+            _ => v1_react(&m.agent, &received).await,
+        };
+        let Some(reply) = reply else { return Ok(Vec::new()) };
+        let packed = m.agent.respond(&received, &reply).await.map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+        Ok::<_, (StatusCode, String)>(packed.unwrap_or_default())
+    };
+    let app = Router::new().route("/", post(handler)).with_state(mediator.clone());
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    mediator
+}
+
+#[tokio::test]
+async fn a_v1_mediated_server_invites_and_keeps_its_connections() {
+    let v1_mediator = start_v1_mediator().await;
+    let mediator_invitation = Agent::invitation_url("https://m.example/", &v1_mediator.agent.create_invitation("Mediator").unwrap());
+    let world = world(|c| c.v1_mediator = Some(mediator_invitation)).await;
+    let carol = start_carol().await;
+
+    let identity = data(&world.call("get_identity", json!({})).await);
+    assert_eq!(identity["didcomm_v1"]["can_receive"], true, "{identity}");
+    assert_eq!(identity["didcomm_v1"]["mediation"]["endpoint"], v1_mediator.agent.endpoint());
+
+    // Carol accepts our invitation; her request waits at the mediator.
+    let created = data(&world.call("create_invitation", json!({"label": "Claude"})).await);
+    let url = created["invitation_url"].as_str().unwrap();
+    let invitation = carol.fetch_invitation(url).await.unwrap();
+    let carols = carol.accept_invitation(&invitation, "Carol").await.unwrap();
+
+    // Fetching answers it; Carol completes, which the next fetch records.
+    let fetched = data(&world.call("fetch_messages", json!({})).await);
+    assert_eq!(fetched["messages"][0]["handshake"], "handled; see list_connections", "{fetched}");
+    assert_eq!(carol.connection(&carols.id).unwrap().state, didcomm_agent::ConnectionState::Completed);
+    data(&world.call("fetch_messages", json!({})).await);
+    let listed = data(&world.call("list_connections", json!({})).await);
+    let ours = listed["connections"].as_array().unwrap().iter().find(|c| c["id"] == carols.id.as_str()).unwrap().clone();
+    assert_eq!(ours["state"], "completed");
+    assert_eq!(ours["their_label"], "Carol");
+
+    // Carol writes unprompted; it arrives through the mediator, and our ack reaches her.
+    carol.send(&carols.id, &json!({"@type": BASICMESSAGE_V1, "content": "hello", "sent_time": "2026-10-02T00:00:00Z"})).await.unwrap();
+    let fetched = data(&world.call("fetch_messages", json!({})).await);
+    assert_eq!(fetched["messages"][0]["message"]["content"], "hello");
+    assert_eq!(fetched["messages"][0]["connection"], carols.id.as_str());
+
+    // A restarted server (same identity and state file) still has both.
+    let restarted = serve(world.identity.clone(), world.config.clone()).await;
+    let listed = data(&call(&restarted, "list_connections", json!({})).await);
+    assert!(listed["connections"].as_array().unwrap().iter().any(|c| c["id"] == carols.id.as_str()));
+    let identity = data(&call(&restarted, "get_identity", json!({})).await);
+    assert_eq!(identity["didcomm_v1"]["mediation"]["endpoint"], v1_mediator.agent.endpoint());
 }
