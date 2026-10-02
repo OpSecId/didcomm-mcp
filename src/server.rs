@@ -252,7 +252,7 @@ impl DidcommMcp {
     }
 
     #[tool(
-        description = "Get a DIDComm protocol's definition from the documentation registry: metadata, roles, the DIDComm versions it's used with, the prose sections you ask for, and every message type with examples and its JSON Schemas (one per DIDComm version, when the registry has them). Ask for specific sections to keep the result small.",
+        description = "Get a DIDComm protocol's definition from the documentation registry: metadata, roles, the DIDComm versions it's used with, the prose sections you ask for, and every message type with examples and its JSON Schemas (one per DIDComm version, when the registry has them). For credential protocols (issue-credential, present-proof) it also lists the attachment formats their messages carry (attachment_formats: e.g. anoncreds/credential-offer@v1.0), with a JSON Schema for each attachment's content per message. Ask for specific sections to keep the result small.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn lookup_protocol_documentation(&self, Parameters(args): Parameters<LookupProtocolArgs>) -> Result<CallToolResult, ErrorData> {

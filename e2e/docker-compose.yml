@@ -44,5 +44,7 @@ services:
     environment:
       DIDCOMM_MCP_REGISTRY_DID: ${DIDCOMM_MCP_REGISTRY_DID:-}
       DIDCOMM_MCP_MEDIATOR_DID: ${DIDCOMM_MCP_MEDIATOR_DID:-}
+      # The stack's mediator only speaks DIDComm v2: no v1 mediation.
+      DIDCOMM_MCP_V1_MEDIATOR: ""
       RUST_LOG: ${RUST_LOG:-info}
     depends_on: [registry, mediator, bob]
