@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: cargo test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+
+  docker:
+    name: docker build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          cache-from: type=gha,scope=mcp
+          cache-to: type=gha,mode=max,scope=mcp
+
+  e2e:
+    name: end to end (e2e/run.py)
+    runs-on: ubuntu-24.04
+    env:
+      # A token that can read wyvrn-cloud/documentation-server (private). Without it
+      # this job can't build the registry, so it's skipped.
+      WYVRN_READ_TOKEN: ${{ secrets.WYVRN_READ_TOKEN }}
+    steps:
+      - name: Skip without WYVRN_READ_TOKEN
+        if: env.WYVRN_READ_TOKEN == ''
+        run: echo "::notice::WYVRN_READ_TOKEN isn't set, so the end-to-end test is skipped."
+      - uses: actions/checkout@v4
+        if: env.WYVRN_READ_TOKEN != ''
+      - uses: actions/checkout@v4
+        if: env.WYVRN_READ_TOKEN != ''
+        with:
+          repository: wyvrn-cloud/didcomm
+          path: .ci/didcomm
+      - uses: actions/checkout@v4
+        if: env.WYVRN_READ_TOKEN != ''
+        with:
+          repository: wyvrn-cloud/documentation-server
+          token: ${{ secrets.WYVRN_READ_TOKEN }}
+          path: .ci/documentation-server
+          submodules: true
+      - name: Run e2e/run.py (builds every image with docker compose)
+        if: env.WYVRN_READ_TOKEN != ''
+        env:
+          DIDCOMM_DIR: ${{ github.workspace }}/.ci/didcomm
+          DOCSERVER_DIR: ${{ github.workspace }}/.ci/documentation-server
+        run: python3 e2e/run.py
