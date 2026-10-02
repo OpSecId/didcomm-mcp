@@ -20,6 +20,8 @@ path = "data/identity.json"
 # next to a protocol definition (<protocol>/<version>/schemas/*.json) win over these.
 schemas = ["schemas"]
 mappings = "mappings/piuri-paths.toml"
+# Each source's commit, for when git can't tell (the container image has no .git).
+revisions = "sources/revisions.toml"
 # Upper bound on documentation/1.0 query page size.
 max_query_limit = 200
 
