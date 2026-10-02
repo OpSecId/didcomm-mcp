@@ -20,6 +20,8 @@ axum = "0.8"
 jsonschema = { version = "0.33", default-features = false }
 rmcp = { version = "3.5", features = ["server", "transport-io", "transport-streamable-http-server", "macros", "schemars"] }
 schemars = "1"
+# The registry's didcomm_versions are semver requirements (^1.0, ^2.0).
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "1"

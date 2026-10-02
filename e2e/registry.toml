@@ -22,7 +22,7 @@ schemas = ["schemas"]
 mappings = "mappings/piuri-paths.toml"
 # Each source's commit, for when git can't tell (the container image has no .git).
 revisions = "sources/revisions.toml"
-# Upper bound on documentation/1.0 query page size.
+# Upper bound on documentation query page size.
 max_query_limit = 200
 
 [[source]]
@@ -36,6 +36,20 @@ piuri_base = "https://didcomm.org/"
 name = "didcomm-messaging"
 kind = "didcomm-spec"
 path = "sources/didcomm-messaging"
+
+[[source]]
+name = "aries-rfcs"
+kind = "rfcs"
+path = "sources/aries-rfcs"
+manifest = "mappings/aries-rfcs.toml"
+didcomm_versions = ["^1.0"]
+
+[[source]]
+name = "waci-didcomm"
+kind = "rfcs"
+path = "sources/waci-didcomm"
+manifest = "mappings/waci-didcomm.toml"
+didcomm_versions = ["^2.0"]
 
 # More folders of protocol definitions in the didcomm.org layout can be added, e.g. a
 # checkout of https://github.com/wyvrn-cloud/protocols (off by default):

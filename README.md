@@ -5,6 +5,9 @@ and use [DIDComm v2](https://identity.foundation/didcomm-messaging/spec/v2.1/)
 protocols with any DIDComm agent. All encryption, keys, DID resolution, mediation and
 transport stay inside this server; the AI only ever sees plaintext JSON.
 
+The registry is asked in [`documentation/1.1`](https://github.com/wyvrn-cloud/protocols/blob/master/protocols/documentation/1.1/readme.md),
+falling back to 1.0 for a registry that doesn't speak it yet.
+
 The tool set is fixed. New protocols never add tools. Instead the AI looks a protocol up
 in a [documentation registry](https://github.com/wyvrn-cloud/documentation-server) when
 it needs it, then sends that protocol's messages through `send_didcomm_message`.
@@ -15,10 +18,10 @@ it needs it, then sends that protocol's messages through `send_didcomm_message`.
 |---|---|
 | `get_identity` | This agent's DID (give it to peers), its mediation status, and the configured registry. |
 | `discover_features` | Asks a peer which protocols it supports (`discover-features/2.0`). |
-| `search_protocols` | Searches the registry's protocol catalog by URI pattern, text, status or tag. |
-| `lookup_protocol_documentation` | One protocol's definition: roles, the sections you ask for, message types with examples and JSON Schemas. |
-| `lookup_spec` | The DIDComm Messaging spec: table of contents or one section. |
-| `send_didcomm_message` | Sends a message (you give `type` and `body`; `id`, `from`, `to` and `created_time` are filled in). It's validated against the registry's schema first, when there is one. With `wait_for_reply`, it returns the reply received on the same connection. |
+| `search_protocols` | Searches the registry's protocol catalog by URI pattern, text, status, tag or DIDComm version (`didcomm_version`: `2.1`, `1.0`). |
+| `lookup_protocol_documentation` | One protocol's definition: roles, the DIDComm versions it's used with, the sections you ask for, message types with examples and JSON Schemas (one per DIDComm version). |
+| `lookup_spec` | A document's table of contents or one section: the DIDComm Messaging spec (`2.1`, `2.0`, `editors-draft`, and `1.0`, DIDComm v1 as the Aries RFCs define it), or another `document` the registry lists, such as `extension/l10n`. |
+| `send_didcomm_message` | Sends a DIDComm v2 message (you give `type` and `body`; `id`, `from`, `to` and `created_time` are filled in). It's validated against the registry's DIDComm v2 schema first, when there is one; a type the registry lists for DIDComm v1 only is refused. With `wait_for_reply`, it returns the reply received on the same connection. |
 | `fetch_messages` | Collects messages queued at this agent's mediator, and answers trust-pings and feature queries among them. |
 
 Everything that came from a peer or the registry is returned behind an

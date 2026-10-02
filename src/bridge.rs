@@ -2,6 +2,7 @@
 //! plain JSON. `server.rs` turns these into MCP tool results.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use didcomm_agent::{features, Agent, AgentError, Mediation, Received};
@@ -9,9 +10,13 @@ use serde_json::{json, Value};
 
 use crate::config::Config;
 
-pub const DOCUMENTATION_QUERY: &str = "https://wyvrn.app/documentation/1.0/query";
-pub const DOCUMENTATION_REQUEST: &str = "https://wyvrn.app/documentation/1.0/request";
-pub const DOCUMENTATION_SPEC_REQUEST: &str = "https://wyvrn.app/documentation/1.0/spec-request";
+/// The documentation protocol this bridge speaks, and the version it falls back to for
+/// registries that don't know it yet.
+pub const DOCUMENTATION: &str = "https://wyvrn.app/documentation/1.1";
+pub const DOCUMENTATION_1_0: &str = "https://wyvrn.app/documentation/1.0";
+
+/// The DIDComm versions this bridge sends: v2 (as `semver` versions).
+const SENDS: [(u64, u64); 2] = [(2, 0), (2, 1)];
 
 #[derive(Debug, thiserror::Error)]
 pub enum BridgeError {
@@ -27,6 +32,13 @@ pub enum BridgeError {
     Mediation { mediator: String, error: String },
     #[error("the message doesn't match the registry's schema for {message_type}:\n{}", errors.join("\n"))]
     Invalid { message_type: String, errors: Vec<String> },
+    #[error(
+        "{message_type} is a DIDComm v1 message type (the registry lists it for DIDComm {}), and this \
+         server sends DIDComm v2 messages. Use the protocol's DIDComm v2 version if it has one \
+         (search_protocols with didcomm_version 2.1).",
+        didcomm_versions.join(", ")
+    )]
+    DidcommV1Only { message_type: String, didcomm_versions: Vec<String> },
     #[error("{0}")]
     BadArgument(String),
 }
@@ -49,13 +61,69 @@ pub struct Bridge {
     config: Config,
     /// Serializes mediation attempts; the outcome itself lives in the agent.
     mediating: tokio::sync::Mutex<()>,
-    /// Message type → the registry's schema for it (`None`: the registry has none).
-    schemas: Mutex<HashMap<String, Option<Value>>>,
+    /// Message type → what the registry says about it (`None`: it doesn't know it).
+    known_types: Mutex<HashMap<String, Option<KnownType>>>,
+    /// The registry only speaks documentation/1.0.
+    registry_is_1_0: AtomicBool,
+}
+
+/// What the registry says about one message type.
+#[derive(Debug, Clone, Default)]
+struct KnownType {
+    /// The schema for DIDComm v2 plaintext, the kind this bridge sends.
+    schema: Option<Value>,
+    /// Empty when the registry doesn't say.
+    didcomm_versions: Vec<String>,
+}
+
+impl KnownType {
+    fn from_message(message: &Value) -> Self {
+        let didcomm_versions: Vec<String> = message["didcomm_versions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        let schema = match message["schemas"].as_array() {
+            // documentation/1.1: one schema per envelope style; take the v2 one.
+            Some(schemas) => schemas
+                .iter()
+                .find(|s| admits_v2(&strings(&s["didcomm_versions"])))
+                .map(|s| s["schema"].clone()),
+            // documentation/1.0: one schema, for DIDComm v2 plaintext unless it pins
+            // v1's @type.
+            None => message.get("schema").filter(|s| s["properties"].get("@type").is_none()).cloned(),
+        };
+        Self { schema, didcomm_versions }
+    }
+
+    /// Known, and known not to be usable with DIDComm v2.
+    fn v1_only(&self) -> bool {
+        !self.didcomm_versions.is_empty() && !admits_v2(&self.didcomm_versions)
+    }
+}
+
+fn strings(value: &Value) -> Vec<String> {
+    value.as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_string)).collect()
+}
+
+/// Whether any of `ranges` (semver requirements, e.g. `^2.0`) admits a DIDComm version
+/// this bridge sends.
+fn admits_v2(ranges: &[String]) -> bool {
+    ranges.iter().filter_map(|r| semver::VersionReq::parse(r).ok()).any(|r| {
+        SENDS.iter().any(|(major, minor)| r.matches(&semver::Version::new(*major, *minor, 0)))
+    })
 }
 
 impl Bridge {
     pub fn new(agent: Agent, config: Config) -> Self {
-        Self { agent, config, mediating: tokio::sync::Mutex::new(()), schemas: Mutex::new(HashMap::new()) }
+        Self {
+            agent,
+            config,
+            mediating: tokio::sync::Mutex::new(()),
+            known_types: Mutex::new(HashMap::new()),
+            registry_is_1_0: AtomicBool::new(false),
+        }
     }
 
     pub fn agent(&self) -> &Agent {
@@ -114,18 +182,31 @@ impl Bridge {
         Ok(self.agent.request(target, &query).await?)
     }
 
-    async fn ask_registry(&self, message_type: &str, body: Value) -> Result<Received, BridgeError> {
+    /// Ask the registry `name` (`query`, `request`, `spec-request`) in documentation/1.1,
+    /// or 1.0 once it has said it doesn't support 1.1.
+    async fn ask_registry(&self, name: &str, body: Value) -> Result<Received, BridgeError> {
         let registry = self.config.registry_did.as_deref().ok_or(BridgeError::NoRegistry)?;
-        Ok(self.agent.request(registry, &json!({"type": message_type, "body": body})).await?)
+        if !self.registry_is_1_0.load(Ordering::Relaxed) {
+            let message = json!({"type": format!("{DOCUMENTATION}/{name}"), "body": body.clone()});
+            match self.agent.request(registry, &message).await {
+                Err(AgentError::Problem { code, .. }) if code == "e.p.msg.unsupported" => {
+                    tracing::info!("the registry doesn't speak documentation/1.1; using 1.0");
+                    self.registry_is_1_0.store(true, Ordering::Relaxed);
+                }
+                result => return Ok(result?),
+            }
+        }
+        let message = json!({"type": format!("{DOCUMENTATION_1_0}/{name}"), "body": body});
+        Ok(self.agent.request(registry, &message).await?)
     }
 
-    /// `search_protocols`: a documentation/1.0 `query`; `body` is passed through.
+    /// `search_protocols`: a documentation `query`; `body` is passed through.
     pub async fn search_protocols(&self, body: Value) -> Result<Received, BridgeError> {
-        self.ask_registry(DOCUMENTATION_QUERY, body).await
+        self.ask_registry("query", body).await
     }
 
-    /// `lookup_protocol_documentation`: a documentation/1.0 `request`. Caches the schemas
-    /// it returns for `send_didcomm_message`'s validation.
+    /// `lookup_protocol_documentation`: a documentation `request`. Remembers what it
+    /// says about each message type for `send_didcomm_message`.
     pub async fn lookup_protocol(
         &self,
         protocol_uri: &str,
@@ -136,59 +217,61 @@ impl Bridge {
         if let Some(sections) = sections {
             body["sections"] = json!(sections);
         }
-        let reply = self.ask_registry(DOCUMENTATION_REQUEST, body).await?;
-        self.cache_schemas(&reply.message["body"]);
+        let reply = self.ask_registry("request", body).await?;
+        self.remember_types(&reply.message["body"]);
         Ok(reply)
     }
 
-    /// `lookup_spec`: a documentation/1.0 `spec-request`.
-    pub async fn lookup_spec(&self, version: Option<&str>, section: Option<&str>) -> Result<Received, BridgeError> {
+    /// `lookup_spec`: a documentation `spec-request` for `document` (default: the
+    /// spec itself).
+    pub async fn lookup_spec(
+        &self,
+        document: Option<&str>,
+        version: Option<&str>,
+        section: Option<&str>,
+    ) -> Result<Received, BridgeError> {
         let mut body = json!({});
-        if let Some(version) = version {
-            body["version"] = json!(version);
+        for (key, value) in [("document", document), ("version", version), ("section", section)] {
+            if let Some(value) = value {
+                body[key] = json!(value);
+            }
         }
-        if let Some(section) = section {
-            body["section"] = json!(section);
-        }
-        self.ask_registry(DOCUMENTATION_SPEC_REQUEST, body).await
+        self.ask_registry("spec-request", body).await
     }
 
-    fn cache_schemas(&self, response_body: &Value) {
-        let mut cache = self.schemas.lock().expect("schema cache lock poisoned");
+    fn remember_types(&self, response_body: &Value) {
+        let mut known = self.known_types.lock().expect("known types lock poisoned");
         for message in response_body["messages"].as_array().into_iter().flatten() {
             if let Some(message_type) = message["type"].as_str() {
-                cache.insert(message_type.to_string(), message.get("schema").cloned());
+                known.insert(message_type.to_string(), Some(KnownType::from_message(message)));
             }
         }
     }
 
-    /// The registry's schema for `message_type`, if it has one -- only from a response
-    /// for exactly that protocol version (a registry may answer with another minor
-    /// version, whose schema wouldn't be the right one).
-    async fn schema_for(&self, message_type: &str) -> Result<Option<Value>, BridgeError> {
-        if let Some(cached) = self.schemas.lock().expect("schema cache lock poisoned").get(message_type) {
+    /// What the registry says about `message_type` -- only from a response for exactly
+    /// that protocol version (a registry may answer with another minor version, whose
+    /// schema wouldn't be the right one).
+    async fn known_type(&self, message_type: &str) -> Result<Option<KnownType>, BridgeError> {
+        if let Some(cached) = self.known_types.lock().expect("known types lock poisoned").get(message_type) {
             return Ok(cached.clone());
         }
         let Some((piuri, _)) = message_type.rsplit_once('/') else {
             return Ok(None);
         };
-        let reply = match self
-            .ask_registry(DOCUMENTATION_REQUEST, json!({"piuri": piuri, "sections": [], "messages": true}))
-            .await
-        {
+        let reply = match self.ask_registry("request", json!({"piuri": piuri, "sections": [], "messages": true})).await {
             Ok(reply) => reply,
             Err(BridgeError::Agent(AgentError::Problem { code, .. })) if code.starts_with("e.p.not-found") => {
-                self.schemas.lock().expect("schema cache lock poisoned").insert(message_type.to_string(), None);
+                self.known_types.lock().expect("known types lock poisoned").insert(message_type.to_string(), None);
                 return Ok(None);
             }
             Err(e) => return Err(e),
         };
         let body = &reply.message["body"];
         if body["piuri"] == piuri {
-            self.cache_schemas(body);
+            self.remember_types(body);
         }
-        let mut cache = self.schemas.lock().expect("schema cache lock poisoned");
-        Ok(cache.entry(message_type.to_string()).or_insert(None).clone())
+        let mut known = self.known_types.lock().expect("known types lock poisoned");
+        Ok(known.entry(message_type.to_string()).or_insert(None).clone())
     }
 
     /// Mediate if configured, ignoring failure -- for sends, whose `from` should be the
@@ -224,13 +307,25 @@ impl Bridge {
             }
         }
 
+        let known = match self.config.registry_did {
+            Some(_) => Some(self.known_type(&outgoing.message_type).await),
+            None => None,
+        };
+        if let Some(Ok(Some(known))) = &known {
+            if known.v1_only() {
+                return Err(BridgeError::DidcommV1Only {
+                    message_type: outgoing.message_type,
+                    didcomm_versions: known.didcomm_versions.clone(),
+                });
+            }
+        }
+
         let validation = if !outgoing.validate || !self.config.validate_messages {
             "disabled".to_string()
-        } else if self.config.registry_did.is_none() {
-            "skipped: no documentation registry configured".to_string()
         } else {
-            match self.schema_for(&outgoing.message_type).await {
-                Ok(Some(schema)) => {
+            match known {
+                None => "skipped: no documentation registry configured".to_string(),
+                Some(Ok(Some(KnownType { schema: Some(schema), .. }))) => {
                     let validator = jsonschema::validator_for(&schema).map_err(|e| BridgeError::Invalid {
                         message_type: outgoing.message_type.clone(),
                         errors: vec![format!("the registry's schema itself is invalid: {e}")],
@@ -247,8 +342,8 @@ impl Bridge {
                     }
                     "passed".to_string()
                 }
-                Ok(None) => "skipped: the registry has no schema for this message type".to_string(),
-                Err(e) => format!("skipped: couldn't get a schema from the registry ({e})"),
+                Some(Ok(_)) => "skipped: the registry has no schema for this message type".to_string(),
+                Some(Err(e)) => format!("skipped: couldn't get a schema from the registry ({e})"),
             }
         };
 

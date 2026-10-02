@@ -1061,6 +1061,7 @@ dependencies = [
  "reqwest",
  "rmcp",
  "schemars 1.2.2",
+ "semver",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
