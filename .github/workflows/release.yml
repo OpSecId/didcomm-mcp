@@ -3,7 +3,9 @@ name: Release
 # Pushing a tag vX.Y.Z (matching Cargo.toml's version) builds didcomm-mcp for every
 # platform below, smoke-tests each build on its own OS (including installing it as a
 # system service), and publishes a GitHub release with the archives and SHA256SUMS.
-# Pull requests that touch the release path, and manual runs, do everything but publish.
+# So does running it by hand on master with "publish" ticked, which tags the commit
+# v<Cargo.toml's version> itself. Pull requests that touch the release path, and other
+# manual runs, do everything but publish.
 
 on:
   push:
@@ -17,6 +19,11 @@ on:
       - Cargo.toml
       - Cargo.lock
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a release, tagging this commit v<version from Cargo.toml> (master only)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -110,12 +117,27 @@ jobs:
   release:
     name: publish
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/master')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - name: Tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          tag="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if gh release view "$tag" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "::error::$tag already exists: bump the version in Cargo.toml first"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v4
         with:
           pattern: dist-*
@@ -128,8 +150,10 @@ jobs:
           rm *.sha256
           sha256sum -c SHA256SUMS
       - name: Release notes
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${TAG#v}"
           # This version's section of the changelog.
           awk -v v="$version" '/^## /{ if (found) exit; if ($2 == v || $2 == "["v"]") { found=1; next } } found' CHANGELOG.md > notes.md
           if [ ! -s notes.md ]; then echo "::error::CHANGELOG.md has no section for $version"; exit 1; fi
@@ -139,20 +163,22 @@ jobs:
 
           | Platform | Archive |
           |---|---|
-          | Linux x86_64 (static, any distribution) | [didcomm-mcp-x86_64-unknown-linux-musl.tar.gz](https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/didcomm-mcp-x86_64-unknown-linux-musl.tar.gz) |
-          | Linux ARM64 (static, any distribution) | [didcomm-mcp-aarch64-unknown-linux-musl.tar.gz](https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/didcomm-mcp-aarch64-unknown-linux-musl.tar.gz) |
-          | macOS Apple silicon | [didcomm-mcp-aarch64-apple-darwin.tar.gz](https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/didcomm-mcp-aarch64-apple-darwin.tar.gz) |
-          | macOS Intel | [didcomm-mcp-x86_64-apple-darwin.tar.gz](https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/didcomm-mcp-x86_64-apple-darwin.tar.gz) |
-          | Windows x64 | [didcomm-mcp-x86_64-pc-windows-msvc.zip](https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/didcomm-mcp-x86_64-pc-windows-msvc.zip) |
-          | Windows ARM64 | [didcomm-mcp-aarch64-pc-windows-msvc.zip](https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/didcomm-mcp-aarch64-pc-windows-msvc.zip) |
+          | Linux x86_64 (static, any distribution) | [didcomm-mcp-x86_64-unknown-linux-musl.tar.gz](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/didcomm-mcp-x86_64-unknown-linux-musl.tar.gz) |
+          | Linux ARM64 (static, any distribution) | [didcomm-mcp-aarch64-unknown-linux-musl.tar.gz](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/didcomm-mcp-aarch64-unknown-linux-musl.tar.gz) |
+          | macOS Apple silicon | [didcomm-mcp-aarch64-apple-darwin.tar.gz](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/didcomm-mcp-aarch64-apple-darwin.tar.gz) |
+          | macOS Intel | [didcomm-mcp-x86_64-apple-darwin.tar.gz](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/didcomm-mcp-x86_64-apple-darwin.tar.gz) |
+          | Windows x64 | [didcomm-mcp-x86_64-pc-windows-msvc.zip](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/didcomm-mcp-x86_64-pc-windows-msvc.zip) |
+          | Windows ARM64 | [didcomm-mcp-aarch64-pc-windows-msvc.zip](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/didcomm-mcp-aarch64-pc-windows-msvc.zip) |
 
           Checksums are in \`SHA256SUMS\`. Installing, connecting an MCP host, configuring it and
-          running it as a service: [docs/install.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/install.md).
+          running it as a service: [docs/install.md](https://github.com/$GITHUB_REPOSITORY/blob/$TAG/docs/install.md).
           EOF
           cat notes.md
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --title "didcomm-mcp ${GITHUB_REF_NAME#v}" --notes-file notes.md --verify-tag
+          # An existing tag is used as it is; otherwise this creates it on this commit.
+          gh release create "$TAG" dist/* --target "$GITHUB_SHA" \
+            --title "didcomm-mcp ${TAG#v}" --notes-file notes.md
