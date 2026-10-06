@@ -234,7 +234,9 @@ that touch the release path, and on manual runs.
 
 1. Set the new version in `Cargo.toml` (and `Cargo.lock`, with `cargo update -p didcomm-mcp`)
    and add its section to [`CHANGELOG.md`](CHANGELOG.md); merge that.
-2. Tag the merge commit and push the tag: `git tag v0.2.0 && git push origin v0.2.0`.
+2. Either push a tag on the merge commit (`git tag v0.2.0 && git push origin v0.2.0`), or
+   run the **Release** workflow on `master` from the Actions tab with **publish** ticked,
+   which creates the tag itself.
 
 The release workflow checks that the tag matches `Cargo.toml`, builds and tests every
 platform, and publishes the GitHub release with the archives, `SHA256SUMS`, and the
