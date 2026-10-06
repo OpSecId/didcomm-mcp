@@ -1,8 +1,9 @@
 //! Configuration: an optional TOML file, then environment-variable overrides.
 //!
 //! File location: the `--config <path>` argument, else `$DIDCOMM_MCP_CONFIG`, else
-//! `$XDG_CONFIG_HOME/didcomm-mcp/config.toml` (`~/.config/...`) if it exists. Every
-//! setting has a default, so no file is needed at all.
+//! [`user_config_path`] if it exists: `$XDG_CONFIG_HOME/didcomm-mcp/config.toml`
+//! (`~/.config/...`) on Linux and macOS, `%APPDATA%\didcomm-mcp\config.toml` on Windows.
+//! Every setting has a default, so no file is needed at all.
 
 use std::path::PathBuf;
 
@@ -154,29 +155,45 @@ impl Config {
     }
 }
 
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from)
+}
+
 fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    env_path("HOME").or_else(|| env_path("USERPROFILE"))
+}
+
+/// The per-user configuration file, read when no other is named:
+/// `$XDG_CONFIG_HOME/didcomm-mcp/config.toml` (`~/.config/...`), or on Windows
+/// `%APPDATA%\didcomm-mcp\config.toml`.
+pub fn user_config_path() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("config.toml"))
 }
 
 fn config_dir() -> Option<PathBuf> {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| home().map(|h| h.join(".config")))
-        .map(|d| d.join("didcomm-mcp"))
+    let base = if cfg!(windows) {
+        env_path("APPDATA")
+    } else {
+        env_path("XDG_CONFIG_HOME").or_else(|| home().map(|h| h.join(".config")))
+    };
+    base.map(|d| d.join("didcomm-mcp"))
 }
 
+/// `$XDG_DATA_HOME/didcomm-mcp/identity.json` (`~/.local/share/...`), or on Windows
+/// `%LOCALAPPDATA%\didcomm-mcp\identity.json`: keys stay on this machine.
 fn default_identity_path() -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| home().map(|h| h.join(".local").join("share")))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("didcomm-mcp")
-        .join("identity.json")
+    let base = if cfg!(windows) {
+        env_path("LOCALAPPDATA").or_else(|| env_path("APPDATA"))
+    } else {
+        env_path("XDG_DATA_HOME").or_else(|| home().map(|h| h.join(".local").join("share")))
+    };
+    base.unwrap_or_else(|| PathBuf::from(".")).join("didcomm-mcp").join("identity.json")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn resolve(toml: &str, env: &[(&str, &str)]) -> Config {
         let file: ConfigFile = toml::from_str(toml).unwrap();
@@ -189,7 +206,7 @@ mod tests {
         assert_eq!(config.mediator_did.as_deref(), Some(DEFAULT_MEDIATOR));
         assert_eq!(config.registry_did.as_deref(), Some(DEFAULT_REGISTRY));
         assert!(config.validate_messages);
-        assert!(config.identity_path.ends_with("didcomm-mcp/identity.json"));
+        assert!(config.identity_path.ends_with(Path::new("didcomm-mcp").join("identity.json")));
     }
 
     #[test]

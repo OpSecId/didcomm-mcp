@@ -36,19 +36,35 @@ A typical exchange, the brief's six steps: `discover_features` on the peer, then
 `search_protocols` / `lookup_protocol_documentation`, then `send_didcomm_message`, then
 `fetch_messages` for the reply.
 
-## Running it
+## Install
+
+Download the archive for your platform from the
+[latest release](https://github.com/wyvrn-cloud/mcp/releases/latest): Linux (x86_64,
+ARM64; static, any distribution), macOS (Apple silicon, Intel) or Windows (x64, ARM64).
+For example, on Linux:
 
 ```sh
-cargo build --release
+curl -fL https://github.com/wyvrn-cloud/mcp/releases/latest/download/didcomm-mcp-x86_64-unknown-linux-musl.tar.gz | tar xz
+sudo install -m 755 didcomm-mcp-x86_64-unknown-linux-musl/didcomm-mcp /usr/local/bin/
 ```
 
-MCP host configuration (e.g. Claude Code's `.mcp.json` or Claude Desktop's config):
+**[docs/install.md](docs/install.md)** walks through every platform: downloading and
+verifying, connecting Claude Code, Claude Desktop or another MCP host, configuring it,
+running it as a service, upgrading and uninstalling.
+
+To build it yourself: `cargo install --locked --git https://github.com/wyvrn-cloud/mcp didcomm-mcp`.
+
+## Running it
+
+An MCP host launches it and talks to it over stdio. In Claude Code:
+`claude mcp add didcomm -- /usr/local/bin/didcomm-mcp`. In a host's JSON configuration
+(e.g. Claude Code's `.mcp.json` or Claude Desktop's config):
 
 ```json
 {
   "mcpServers": {
     "didcomm": {
-      "command": "/path/to/didcomm-mcp"
+      "command": "/usr/local/bin/didcomm-mcp"
     }
   }
 }
@@ -105,6 +121,22 @@ MCP host configuration for an HTTP server:
 }
 ```
 
+### As a service
+
+`didcomm-mcp service install` runs `--http` as a service that starts with the machine:
+a systemd unit on Linux, a launchd daemon on macOS, a Windows service on Windows (or,
+with `--user` on Linux and macOS, a service of your own). It writes a configuration
+with a new bearer token if there's none, starts the service, and prints the URL and the
+command to connect Claude Code. Running it again after an upgrade restarts the service
+with the new binary; `didcomm-mcp service uninstall` removes it.
+
+```sh
+sudo didcomm-mcp service install
+```
+
+See [docs/install.md](docs/install.md#4-run-it-as-a-service) for where each platform
+keeps the configuration, identity and logs, and how to manage the service.
+
 ### Logging
 
 It speaks MCP over stdio and logs to stderr (`RUST_LOG=debug` for more). On first start
@@ -117,12 +149,14 @@ are kept in a state file next to the identity.
 ## Configuration
 
 Everything has a default, so no file is needed. To use one, pass `--config <path>`, set
-`$DIDCOMM_MCP_CONFIG`, or put it at `~/.config/didcomm-mcp/config.toml`.
-Environment variables override the file.
+`$DIDCOMM_MCP_CONFIG`, or put it at `~/.config/didcomm-mcp/config.toml`
+(`%APPDATA%\didcomm-mcp\config.toml` on Windows). Environment variables override the
+file. A service uses the file `service install` wrote (see
+[docs/install.md](docs/install.md#where-things-are)).
 
 | Setting (`config.toml`) | Environment | Default | |
 |---|---|---|---|
-| `identity_path` | `DIDCOMM_MCP_IDENTITY` | `~/.local/share/didcomm-mcp/identity.json` | This agent's keys. Keep the file to keep the DID. |
+| `identity_path` | `DIDCOMM_MCP_IDENTITY` | `~/.local/share/didcomm-mcp/identity.json` (Windows: `%LOCALAPPDATA%\didcomm-mcp\identity.json`) | This agent's keys. Keep the file to keep the DID. |
 | `registry_did` | `DIDCOMM_MCP_REGISTRY_DID` | `did:web:docs.wyvrn.app` | The [documentation registry](https://github.com/wyvrn-cloud/documentation-server). `""` disables it: the lookup tools then report that none is configured, and sends skip validation. |
 | `mediator_did` | `DIDCOMM_MCP_MEDIATOR_DID` | the Indicio public mediator | Receives messages for this agent. `""` disables mediation; replies then only arrive via `wait_for_reply`. Indicio's is for development and demos, not production. |
 | `v1_mediator` | `DIDCOMM_MCP_V1_MEDIATOR` | `mediator_did` | The DIDComm v1 mediator: a DID (connected to through an implicit invitation, as the Indicio public mediator accepts) or an out-of-band invitation URL. `""` disables it; v1 peers can then only answer on the same connection, and `create_invitation` is unavailable. |
@@ -189,5 +223,21 @@ running.
 `.github/workflows/ci.yml` runs `cargo test`, a `docker build`, and `e2e/run.py` on every
 pull request. The end-to-end job needs a `WYVRN_READ_TOKEN` repository secret, a token
 that can read the private `wyvrn-cloud/documentation-server`; without it, the job skips.
+
+`.github/workflows/release.yml` builds the release binaries for six targets and
+smoke-tests each on its own OS (`.github/scripts/smoke_test.py`): `--version`, MCP over
+stdio, and, on every platform but Intel macOS, a real `service install`, an MCP request
+with the generated token, a reinstall, and `service uninstall`. It runs on pull requests
+that touch the release path, and on manual runs.
+
+## Releasing
+
+1. Set the new version in `Cargo.toml` (and `Cargo.lock`, with `cargo update -p didcomm-mcp`)
+   and add its section to [`CHANGELOG.md`](CHANGELOG.md); merge that.
+2. Tag the merge commit and push the tag: `git tag v0.2.0 && git push origin v0.2.0`.
+
+The release workflow checks that the tag matches `Cargo.toml`, builds and tests every
+platform, and publishes the GitHub release with the archives, `SHA256SUMS`, and the
+changelog section as its notes.
 
 See [`PLAN.md`](PLAN.md) for the design of the whole system.
