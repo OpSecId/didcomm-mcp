@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -6,22 +7,29 @@ use didcomm_agent::{Agent, Features, Identity};
 use didcomm_mcp::{bridge::Bridge, config::Config, server::DidcommMcp};
 use rmcp::ServiceExt;
 
+mod service;
+
 const USAGE: &str = "usage: didcomm-mcp [--config <path>] [--http [<address>]]
+       didcomm-mcp service install [--user] [--config <path>] [--bind <address>]
+       didcomm-mcp service uninstall [--user]
 
   (default)            serve MCP over stdio, for an MCP host that launches this process
   --http [<address>]   serve MCP over Streamable HTTP at http://<address>/mcp instead
                        (default address: http.bind, 127.0.0.1:8090)
-  --config <path>      configuration file (see README)";
+  --config <path>      configuration file (see README)
+  service install      run `--http` as a system service (or with --user, a user service)
+                       that starts with the machine; see `didcomm-mcp service --help`
+  -V, --version        print the version";
 
-struct Args {
-    config: Option<PathBuf>,
+pub struct Args {
+    pub config: Option<PathBuf>,
     /// `Some(None)`: `--http` without an address.
-    http: Option<Option<String>>,
+    pub http: Option<Option<String>>,
 }
 
-fn parse_args() -> anyhow::Result<Args> {
+fn parse_args(args: impl IntoIterator<Item = String>) -> anyhow::Result<Args> {
     let mut parsed = Args { config: None, http: None };
-    let mut args = std::env::args().skip(1).peekable();
+    let mut args = args.into_iter().peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--config" => parsed.config = Some(PathBuf::from(args.next().ok_or_else(|| anyhow::anyhow!(USAGE))?)),
@@ -36,18 +44,55 @@ fn parse_args() -> anyhow::Result<Args> {
     Ok(parsed)
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // stdout carries the MCP protocol in stdio mode; logs always go to stderr.
+fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("service") => return service::cli(&args[1..]),
+        Some("-V" | "--version") => {
+            println!("didcomm-mcp {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        #[cfg(windows)]
+        Some(service::windows::RUN_AS_SERVICE) => return service::windows::run(&args[1..]),
+        _ => {}
+    }
+    init_logging(std::io::stderr);
+    let args = parse_args(args)?;
+    tokio::runtime::Runtime::new()?.block_on(run(args, shutdown_signal()))
+}
+
+/// Log to `writer` (stdout carries the MCP protocol in stdio mode, so never stdout).
+fn init_logging<W>(writer: W)
+where
+    W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
+{
     tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
+        .with_writer(writer)
         .with_ansi(false)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
+}
 
-    let args = parse_args()?;
+/// Ctrl-C, or on Unix also SIGTERM (what systemd and launchd stop a service with).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut term) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+/// Serve MCP over stdio, or with `--http` over HTTP until `shutdown` completes.
+pub async fn run(args: Args, shutdown: impl Future<Output = ()> + Send + 'static) -> anyhow::Result<()> {
     let mut config = Config::load(args.config)?;
     if let Some(Some(bind)) = &args.http {
         config.http.bind = bind.clone();
@@ -59,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
     let identity = Identity::load_or_generate(&config.identity_path)
         .with_context(|| format!("identity file {}", config.identity_path.display()))?;
     let bridge = Arc::new(Bridge::new(Agent::new(identity)?.with_features(Features::standard().with_v1()), config));
-    tracing::info!(did = %bridge.agent().base_did(), "didcomm-mcp starting");
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), did = %bridge.agent().base_did(), "didcomm-mcp starting");
 
     // Mediate in the background so the MCP handshake isn't held up by the network;
     // tools that need it wait for (or retry) it.
@@ -78,7 +123,7 @@ async fn main() -> anyhow::Result<()> {
 
     if args.http.is_some() {
         let http = bridge.config().http.clone();
-        return didcomm_mcp::http::serve(bridge, &http).await;
+        return didcomm_mcp::http::serve(bridge, &http, shutdown).await;
     }
     let service = DidcommMcp::new(bridge).serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;

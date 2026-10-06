@@ -1,11 +1,15 @@
 [package]
 name = "didcomm-mcp"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/wyvrn-cloud/mcp"
-description = "An MCP server that lets AI agents discover, learn and use DIDComm v2 protocols with any peer"
+description = "An MCP server that lets AI agents discover, learn and use DIDComm protocols with any peer"
 publish = false
+
+[profile.release]
+strip = true
+lto = "thin"
 
 [[bin]]
 name = "didcomm-mcp"
@@ -30,6 +34,10 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
+
+# `didcomm-mcp service install` on Windows, and running as that service.
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"
 
 [dev-dependencies]
 base64 = "0.22"

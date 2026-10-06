@@ -62,8 +62,12 @@ pub fn router(bridge: Arc<Bridge>, http: &HttpConfig) -> Router {
     mcp.route("/healthz", get(|| async { "ok" }))
 }
 
-/// Serve until Ctrl-C.
-pub async fn serve(bridge: Arc<Bridge>, http: &HttpConfig) -> anyhow::Result<()> {
+/// Serve until `shutdown` completes.
+pub async fn serve(
+    bridge: Arc<Bridge>,
+    http: &HttpConfig,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
     let addr = check(http)?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(
@@ -72,9 +76,7 @@ pub async fn serve(bridge: Arc<Bridge>, http: &HttpConfig) -> anyhow::Result<()>
         "serving MCP over Streamable HTTP"
     );
     axum::serve(listener, router(bridge, http))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(shutdown)
         .await?;
     Ok(())
 }

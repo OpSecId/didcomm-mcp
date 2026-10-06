@@ -27,3 +27,6 @@ target
 
 # CI checkouts of sibling repositories (see .github/workflows/ci.yml)
 .ci/
+
+# Release archives (.github/scripts/package.py)
+/dist/
