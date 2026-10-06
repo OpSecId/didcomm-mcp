@@ -123,12 +123,15 @@ def service(binary):
     status, body = http("/mcp", initialize, token=token)
     check(status == 200 and "didcomm-mcp" in body, f"MCP with the token works ({status})", body)
 
-    step("service install again (an upgrade)")
-    output = install(binary)
-    check("in the configuration" in output, "the existing configuration is kept", output)
-    check(wait_until(healthy, 60), "the service is back")
-    status, _ = http("/mcp", initialize, token=token)
-    check(status == 200, "the same token still works")
+    # Reinstalling replaces a running service; do it a few times, since stopping the old
+    # one and starting the new can race.
+    for attempt in range(1, 4):
+        step(f"service install again (an upgrade), {attempt}/3")
+        output = install(binary)
+        check("in the configuration" in output, "the existing configuration is kept", output)
+        check(wait_until(healthy, 60), "the service is back")
+        status, _ = http("/mcp", initialize, token=token)
+        check(status == 200, "the same token still works")
 
     step("service uninstall")
     out = subprocess.run([binary, "service", "uninstall"], capture_output=True, text=True)

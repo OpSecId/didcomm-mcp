@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 
@@ -85,6 +86,21 @@ pub fn plist(scope: Scope, exe: &Path, config: &Path, log: &Path) -> String {
     )
 }
 
+/// Stop and unload the job if it's loaded, and wait until launchd has let go of it
+/// (bootout returns before it has).
+fn bootout(domain: &str) {
+    let target = format!("{domain}/{LABEL}");
+    if !Command::new("launchctl").args(["bootout", &target]).output().is_ok_and(|o| o.status.success()) {
+        return; // not loaded
+    }
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline
+        && Command::new("launchctl").args(["print", &target]).output().is_ok_and(|o| o.status.success())
+    {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 /// Install (or update) and (re)start the job; returns how to manage it.
 pub fn install(scope: Scope, exe: &Path, config: &Path) -> anyhow::Result<String> {
     let (path, log, domain) = (plist_path(scope)?, log_path(scope)?, domain(scope)?);
@@ -93,9 +109,20 @@ pub fn install(scope: Scope, exe: &Path, config: &Path) -> anyhow::Result<String
     std::fs::write(&path, plist(scope, exe, config, &log))
         .with_context(|| format!("writing {} (run with sudo, or use --user?)", path.display()))?;
     // Replace a running instance; it's fine if there is none.
-    let _ = Command::new("launchctl").args(["bootout", &format!("{domain}/{LABEL}")]).output();
+    bootout(&domain);
     let _ = Command::new("launchctl").args(["enable", &format!("{domain}/{LABEL}")]).output();
-    run(Command::new("launchctl").args(["bootstrap", &domain]).arg(&path))?;
+    // Right after a bootout, bootstrap can still fail ("Input/output error") while
+    // launchd finishes tearing the old job down.
+    let mut attempts = 0;
+    loop {
+        match run(Command::new("launchctl").args(["bootstrap", &domain]).arg(&path)) {
+            Err(_) if attempts < 10 => {
+                attempts += 1;
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            result => break result?,
+        }
+    }
 
     let sudo = if scope == Scope::System { "sudo " } else { "" };
     Ok(format!(
@@ -110,7 +137,7 @@ pub fn uninstall(scope: Scope) -> anyhow::Result<()> {
     if !path.exists() {
         anyhow::bail!("didcomm-mcp isn't installed ({} doesn't exist)", path.display());
     }
-    let _ = Command::new("launchctl").args(["bootout", &format!("{}/{LABEL}", domain(scope)?)]).output();
+    bootout(&domain(scope)?);
     std::fs::remove_file(&path).with_context(|| format!("removing {} (run with sudo?)", path.display()))
 }
 
