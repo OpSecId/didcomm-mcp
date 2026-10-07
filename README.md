@@ -52,7 +52,9 @@ sudo install -m 755 didcomm-mcp-x86_64-unknown-linux-musl/didcomm-mcp /usr/local
 verifying, connecting Claude Code, Claude Desktop or another MCP host, configuring it,
 running it as a service, upgrading and uninstalling.
 
-To build it yourself: `cargo install --locked --git https://github.com/wyvrn-cloud/mcp didcomm-mcp`.
+To build it yourself: `cargo install --locked --git https://github.com/wyvrn-cloud/mcp --tag v0.1.1 didcomm-mcp`
+([docs/building.md](docs/building.md): requirements, building from a clone, static
+builds).
 
 ## Running it
 

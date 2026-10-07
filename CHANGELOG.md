@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.1 - 2026-10-07
+
+- Fixed: a build against the current `didcomm` failed every registry call against
+  `did:web:docs.wyvrn.app` with `invalid COSE structure: COSE_Encrypt is not an array`.
+  The registry, on an earlier `didcomm`, answered in that version's CBOR layout. The
+  release binaries of 0.1.0 weren't affected; builds without `--locked` were.
+  ([wyvrn-cloud/didcomm#10](https://github.com/wyvrn-cloud/didcomm/pull/10): the
+  older layout is read again, and the encoding follows the order of a peer's `accept`
+  list.)
+- This agent now prefers `didcomm/v2+cbor` (COSE) in its DID document; peers without
+  it keep using JSON.
+- `didcomm` is pinned to a commit in `Cargo.toml`, so a build gets the tested version
+  with or without `--locked`.
+- Failed tool calls are logged (a warning; a peer's problem report at info), so they
+  show up in the service's log, not only in the MCP host.
+- [docs/building.md](docs/building.md): building from source, `cargo install`, static
+  builds.
+
 ## 0.1.0 - 2026-10-06
 
 The first release.

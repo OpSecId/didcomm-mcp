@@ -179,10 +179,13 @@ fn untrusted(source: &str, value: &Value) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(UNTRUSTED.replace("{source}", source)), json_block(value)])
 }
 
+/// A failed tool call as tool output, logged too: the MCP host shows the error to the
+/// AI, but only the log shows it to whoever runs the server.
 fn failure(error: BridgeError) -> CallToolResult {
     match error {
         BridgeError::Agent(AgentError::Problem { code, comment, report }) => {
             let sender = report["from"].as_str().unwrap_or("the peer").to_string();
+            tracing::info!(%sender, %code, "tool call answered with a problem report");
             CallToolResult::error(vec![
                 ContentBlock::text(format!(
                     "The peer answered with a problem report: {code}{}",
@@ -192,7 +195,10 @@ fn failure(error: BridgeError) -> CallToolResult {
                 json_block(&report),
             ])
         }
-        other => CallToolResult::error(vec![ContentBlock::text(other.to_string())]),
+        other => {
+            tracing::warn!("tool call failed: {other}");
+            CallToolResult::error(vec![ContentBlock::text(other.to_string())])
+        }
     }
 }
 
