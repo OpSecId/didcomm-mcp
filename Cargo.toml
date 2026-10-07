@@ -1,6 +1,6 @@
 [package]
 name = "didcomm-mcp"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/wyvrn-cloud/mcp"
@@ -16,8 +16,9 @@ name = "didcomm-mcp"
 path = "src/main.rs"
 
 [dependencies]
-# Tracks didcomm's default branch; pin a tag (tag = "...") once it publishes releases.
-didcomm-agent = { git = "https://github.com/wyvrn-cloud/didcomm" }
+# Pinned to a commit, so every build -- `cargo install` without --locked too -- gets the
+# didcomm this release was tested with. Bump it deliberately (and run the tests).
+didcomm-agent = { git = "https://github.com/wyvrn-cloud/didcomm", rev = "4ba7a14f439b47861ac10efad320cfc03acb378c" }
 anyhow = "1"
 axum = "0.8"
 # Validates outgoing messages against the registry's schemas.
@@ -42,6 +43,6 @@ windows-service = "0.8"
 [dev-dependencies]
 base64 = "0.22"
 reqwest = { version = "0.13", features = ["json"] }
-didcomm-mediator-core = { git = "https://github.com/wyvrn-cloud/didcomm" }
-didcomm-quickstart = { git = "https://github.com/wyvrn-cloud/didcomm" }
+didcomm-mediator-core = { git = "https://github.com/wyvrn-cloud/didcomm", rev = "4ba7a14f439b47861ac10efad320cfc03acb378c" }
+didcomm-quickstart = { git = "https://github.com/wyvrn-cloud/didcomm", rev = "4ba7a14f439b47861ac10efad320cfc03acb378c" }
 rmcp = { version = "3.5", features = ["client", "transport-async-rw", "transport-streamable-http-client-reqwest"] }

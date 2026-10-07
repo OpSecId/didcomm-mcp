@@ -99,12 +99,15 @@ run from Explorer. Running it from a terminal, or as a service, isn't affected.
 
 ### From source
 
-With [Rust](https://rustup.rs) installed (a C compiler and CMake are needed too, for
-the cryptography library):
+With [Rust](https://rustup.rs) 1.95 or newer and a C compiler:
 
 ```sh
-cargo install --locked --git https://github.com/wyvrn-cloud/mcp didcomm-mcp
+cargo install --locked --git https://github.com/wyvrn-cloud/mcp --tag v0.1.1 didcomm-mcp
 ```
+
+Keep `--locked`: it builds with the dependency versions the release was tested with.
+[building.md](building.md) covers the requirements per platform, building from a clone,
+static builds, and running a `cargo install`ed binary as a service.
 
 ## 2. Connect an MCP host
 
