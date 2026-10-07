@@ -1164,6 +1164,7 @@ dependencies = [
  "base64 0.22.1",
  "didcomm-agent",
  "didcomm-mediator-core",
+ "didcomm-multiformats",
  "didcomm-quickstart",
  "didcomm-resolver-peer",
  "jsonschema",

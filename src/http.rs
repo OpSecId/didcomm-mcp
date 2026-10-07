@@ -84,6 +84,11 @@ pub fn router(bridge: Arc<Bridge>, http: &HttpConfig) -> Router {
             .with_state(bridge);
         mcp = mcp.merge(didcomm);
     }
+    let short_urls = bridge_for_api.config().public_url.is_some().then(|| crate::short_url::router(bridge_for_api.clone()));
+    let mcp = match short_urls {
+        Some(short_urls) => mcp.merge(short_urls),
+        None => mcp,
+    };
     mcp.merge(crate::api::router(bridge_for_api))
         .route("/healthz", get(|| async { "ok" }))
         .fallback(crate::web::serve)

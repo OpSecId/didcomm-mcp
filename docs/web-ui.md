@@ -9,6 +9,29 @@
 | **Profile** | This agent's display name, picture URL and description, shared with [User Profile 1.0](https://didcomm.org/user-profile/1.0/). "Send to all peers" pushes it to every connection and chat. |
 | **System** | Health, storage, reachability, the effective configuration (secrets redacted), the DIDs. |
 
+## Invitations and short URLs
+
+Connections → **Invite someone** makes an out-of-band invitation:
+
+| | Invitation | Long URL | Short URL (in the QR code) |
+|---|---|---|---|
+| **DIDComm v2** (default) | Out-of-Band 2.0 from this agent's DID; the peer just messages it | `<public>/invitations?_oob=…` | `<public>/invitations?_oobid=<uuid>` |
+| **DIDComm v1** | Out-of-Band 1.1 for DID Exchange (Aries agents) | `<endpoint>?oob=…` | `<public>/invitations/<uuid>` |
+
+The v2 short URL follows "Short URL Message Retrieval" in DIDComm Messaging v2.1
+(`_oob` replaced by `_oobid`); the v1 one follows Aries RFC 0434's URL shortening. Both
+are public (no sign-in): with `Accept: application/json` they answer with the
+invitation, otherwise with a `302` to the long URL. Unknown, expired or revoked: `404`.
+
+Short URLs expire after 7 days by default (1 hour to 90 days, or "until revoked"), are
+listed under **Active invitations**, and can be revoked there. They're stored with the
+rest (`didcomm_mcp_short_urls` in Postgres, `<state>.short_urls.json` with files).
+Without `public_url` there are no short URLs, only the long ones.
+
+Only this agent's own invitations are shortened. It doesn't act as a URL shortener for
+other agents (`https://didcomm.org/shorten-url/1.0`), which on a public endpoint would
+need care not to become an open redirect.
+
 ## Signing in
 
 With `DIDCOMM_MCP_HTTP_TOKEN` set, the UI asks for that token once and exchanges it for

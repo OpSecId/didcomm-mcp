@@ -6,6 +6,7 @@ pub mod bridge;
 pub mod config;
 pub mod http;
 pub mod server;
+pub mod short_url;
 pub mod profile;
 pub mod store;
 pub mod web;

@@ -130,6 +130,14 @@ pub struct CreateInvitationArgs {
     /// How this agent introduces itself to whoever accepts (default `didcomm-mcp`).
     #[serde(default)]
     pub label: Option<String>,
+    /// `v1` (default): an Out-of-Band 1.1 invitation for DID Exchange. `v2`: an
+    /// Out-of-Band 2.0 invitation from this agent's DID.
+    #[serde(default)]
+    pub didcomm_version: Option<String>,
+    /// How long the short URL stays valid, in seconds (default 7 days, at most 90;
+    /// 0: until revoked). Only with a public URL.
+    #[serde(default)]
+    pub validity_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -328,11 +336,16 @@ impl DidcommMcp {
     }
 
     #[tool(
-        description = "Create an out-of-band invitation (DIDComm v1, DID Exchange 1.1/1.0) for another agent to connect to this one. Returns the invitation and an invitation URL to hand over. Requests to it arrive through the v1 mediator: fetch_messages completes the connections.",
+        description = "Create an out-of-band invitation for another agent to connect to this one: DIDComm v1 (Out-of-Band 1.1, DID Exchange; the default) or v2 (Out-of-Band 2.0 from this agent's DID). Returns the invitation, its long URL, and with a public URL a short URL (v2: `?_oobid=`) that is easy to put in a QR code and expires (default 7 days). Requests to a v1 invitation arrive at this agent: fetch_messages completes the connections.",
         annotations(read_only_hint = false, destructive_hint = false, open_world_hint = true)
     )]
     async fn create_invitation(&self, Parameters(args): Parameters<CreateInvitationArgs>) -> Result<CallToolResult, ErrorData> {
-        Ok(match self.bridge.create_invitation(args.label.as_deref()).await {
+        let version = match args.didcomm_version.as_deref() {
+            None | Some("v1") => didcomm_agent::DidcommVersion::V1,
+            Some("v2") => didcomm_agent::DidcommVersion::V2,
+            Some(other) => return Ok(failure(BridgeError::BadArgument(format!("didcomm_version must be v1 or v2, not {other}")))),
+        };
+        Ok(match self.bridge.create_invitation_with(args.label.as_deref(), version, args.validity_seconds).await {
             Ok(result) => CallToolResult::success(vec![json_block(&result)]),
             Err(e) => failure(e),
         })

@@ -40,6 +40,15 @@ CREATE TABLE IF NOT EXISTS didcomm_mcp_messages (
     entry     JSONB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS didcomm_mcp_messages_peer ON didcomm_mcp_messages (peer, id);
+CREATE TABLE IF NOT EXISTS didcomm_mcp_short_urls (
+    id              TEXT PRIMARY KEY,
+    didcomm_version TEXT NOT NULL,
+    invitation      JSONB NOT NULL,
+    long_url        TEXT NOT NULL,
+    created_at      BIGINT NOT NULL,
+    expires_at      BIGINT,
+    revoked         BOOLEAN NOT NULL DEFAULT false
+);
 ";
 
 const IDENTITY_KEY: &str = "identity";
@@ -67,6 +76,29 @@ pub struct Conversation {
     pub count: i64,
 }
 
+/// An invitation behind a short URL (DIDComm v2 `_oobid`, or an RFC 0434 short URL
+/// for v1): what `GET /invitations` serves until it expires or is revoked.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ShortUrl {
+    pub id: String,
+    /// `"v1"` or `"v2"`.
+    pub didcomm_version: String,
+    pub invitation: Value,
+    pub long_url: String,
+    /// Unix seconds.
+    pub created_at: i64,
+    /// Unix seconds; `None`: until revoked.
+    pub expires_at: Option<i64>,
+    pub revoked: bool,
+}
+
+impl ShortUrl {
+    /// Servable at `now`: not revoked, not expired.
+    pub fn is_live(&self, now: i64) -> bool {
+        !self.revoked && self.expires_at.is_none_or(|e| now < e)
+    }
+}
+
 #[derive(Default, Serialize, Deserialize)]
 pub struct FileHistory {
     next_id: i64,
@@ -80,9 +112,11 @@ pub enum Store {
         inbox_path: PathBuf,
         history_path: PathBuf,
         kv_path: PathBuf,
+        short_urls_path: PathBuf,
         inbox: Mutex<VecDeque<Value>>,
         history: Mutex<FileHistory>,
         kv: Mutex<BTreeMap<String, String>>,
+        short_urls: Mutex<BTreeMap<String, ShortUrl>>,
     },
     Postgres(sqlx::PgPool),
 }
@@ -94,15 +128,18 @@ impl Store {
         let inbox_path = state_path.with_extension("inbox.json");
         let history_path = state_path.with_extension("messages.json");
         let kv_path = state_path.with_extension("kv.json");
+        let short_urls_path = state_path.with_extension("short_urls.json");
         Self::Files {
             identity_path: identity_path.to_path_buf(),
             state_path: state_path.to_path_buf(),
             inbox: Mutex::new(read_json(&inbox_path)),
             history: Mutex::new(read_json(&history_path)),
             kv: Mutex::new(read_json(&kv_path)),
+            short_urls: Mutex::new(read_json(&short_urls_path)),
             inbox_path,
             history_path,
             kv_path,
+            short_urls_path,
         }
     }
 
@@ -281,6 +318,92 @@ impl Store {
         }
     }
 
+    /// Store a new short URL, dropping ones that expired before `now`.
+    pub async fn put_short_url(&self, short: &ShortUrl, now: i64) -> anyhow::Result<()> {
+        match self {
+            Self::Files { short_urls, short_urls_path, .. } => {
+                let mut map = short_urls.lock().expect("short urls lock poisoned");
+                map.retain(|_, s| s.expires_at.is_none_or(|e| e > now));
+                map.insert(short.id.clone(), short.clone());
+                write_atomically(short_urls_path, &serde_json::to_vec_pretty(&*map)?)
+            }
+            Self::Postgres(pool) => {
+                sqlx::query("DELETE FROM didcomm_mcp_short_urls WHERE expires_at IS NOT NULL AND expires_at <= $1")
+                    .bind(now)
+                    .execute(pool)
+                    .await?;
+                sqlx::query(
+                    "INSERT INTO didcomm_mcp_short_urls (id, didcomm_version, invitation, long_url, created_at, expires_at, revoked) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                )
+                .bind(&short.id)
+                .bind(&short.didcomm_version)
+                .bind(sqlx::types::Json(&short.invitation))
+                .bind(&short.long_url)
+                .bind(short.created_at)
+                .bind(short.expires_at)
+                .bind(short.revoked)
+                .execute(pool)
+                .await?;
+                Ok(())
+            }
+        }
+    }
+
+    /// A short URL by id (live or not).
+    pub async fn get_short_url(&self, id: &str) -> anyhow::Result<Option<ShortUrl>> {
+        match self {
+            Self::Files { short_urls, .. } => Ok(short_urls.lock().expect("short urls lock poisoned").get(id).cloned()),
+            Self::Postgres(pool) => {
+                let row: Option<(String, String, sqlx::types::Json<Value>, String, i64, Option<i64>, bool)> = sqlx::query_as(
+                    "SELECT id, didcomm_version, invitation, long_url, created_at, expires_at, revoked FROM didcomm_mcp_short_urls WHERE id = $1",
+                )
+                .bind(id)
+                .fetch_optional(pool)
+                .await?;
+                Ok(row.map(short_url_from_row))
+            }
+        }
+    }
+
+    /// Every stored short URL, newest first.
+    pub async fn list_short_urls(&self) -> anyhow::Result<Vec<ShortUrl>> {
+        match self {
+            Self::Files { short_urls, .. } => {
+                let mut list: Vec<ShortUrl> = short_urls.lock().expect("short urls lock poisoned").values().cloned().collect();
+                list.sort_by_key(|s| std::cmp::Reverse(s.created_at));
+                Ok(list)
+            }
+            Self::Postgres(pool) => {
+                let rows: Vec<(String, String, sqlx::types::Json<Value>, String, i64, Option<i64>, bool)> = sqlx::query_as(
+                    "SELECT id, didcomm_version, invitation, long_url, created_at, expires_at, revoked FROM didcomm_mcp_short_urls ORDER BY created_at DESC LIMIT 500",
+                )
+                .fetch_all(pool)
+                .await?;
+                Ok(rows.into_iter().map(short_url_from_row).collect())
+            }
+        }
+    }
+
+    /// Revoke a short URL; `false` if there was none (or it was already revoked).
+    pub async fn revoke_short_url(&self, id: &str) -> anyhow::Result<bool> {
+        match self {
+            Self::Files { short_urls, short_urls_path, .. } => {
+                let mut map = short_urls.lock().expect("short urls lock poisoned");
+                let Some(short) = map.get_mut(id).filter(|s| !s.revoked) else { return Ok(false) };
+                short.revoked = true;
+                write_atomically(short_urls_path, &serde_json::to_vec_pretty(&*map)?)?;
+                Ok(true)
+            }
+            Self::Postgres(pool) => Ok(sqlx::query("UPDATE didcomm_mcp_short_urls SET revoked = true WHERE id = $1 AND NOT revoked")
+                .bind(id)
+                .execute(pool)
+                .await?
+                .rows_affected()
+                > 0),
+        }
+    }
+
     /// Remove a history entry (a message that couldn't be sent after all).
     pub async fn forget(&self, id: i64) -> anyhow::Result<()> {
         match self {
@@ -387,6 +510,12 @@ impl Store {
             .await?),
         }
     }
+}
+
+fn short_url_from_row(
+    (id, didcomm_version, invitation, long_url, created_at, expires_at, revoked): (String, String, sqlx::types::Json<Value>, String, i64, Option<i64>, bool),
+) -> ShortUrl {
+    ShortUrl { id, didcomm_version, invitation: invitation.0, long_url, created_at, expires_at, revoked }
 }
 
 async fn kv_get(pool: &sqlx::PgPool, key: &str) -> anyhow::Result<Option<String>> {

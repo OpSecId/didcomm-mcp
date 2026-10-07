@@ -18,6 +18,12 @@
   `send_back_yours`; listed in discover-features.
 - A conversation history (Postgres `didcomm_mcp_messages`, or a file), and a background
   pickup from the mediators with `--http`.
+- Short invitation URLs: `create_invitation` (tool, web UI) takes `didcomm_version`
+  (`v1` default, or `v2` for an Out-of-Band 2.0 invitation from this agent's DID) and
+  `validity_seconds`, and with a public URL returns a `short_url`:
+  `/invitations?_oobid=<id>` (DIDComm v2 Short URL Message Retrieval) or
+  `/invitations/<id>` (v1, RFC 0434). Public, expiring (7 days by default), revocable;
+  the web UI's QR code encodes it.
 - Railway: `Dockerfile.railway`, `railway-start.sh`, `railway.toml`; see
   [docs/railway.md](docs/railway.md).
 

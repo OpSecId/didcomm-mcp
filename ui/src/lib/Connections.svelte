@@ -16,6 +16,49 @@
   let incoming = $state('');
   let copied = $state(false);
   let enlarged = $state(false);
+  let version = $state('v2');
+  let validity = $state(7 * 24 * 3600);
+  let invitations = $state([]);
+
+  // What to hand over: the short URL when the server has one (public URL set).
+  const shareUrl = $derived(invitation ? invitation.short_url ?? invitation.invitation_url : '');
+  const live = $derived(invitations.filter((i) => i.live));
+
+  const validities = [
+    [3600, '1 hour'],
+    [24 * 3600, '1 day'],
+    [7 * 24 * 3600, '7 days'],
+    [30 * 24 * 3600, '30 days'],
+    [0, 'Until revoked'],
+  ];
+
+  async function loadInvitations() {
+    try {
+      invitations = await api.invitations();
+    } catch {
+      /* listed again later */
+    }
+  }
+
+  async function revoke(id) {
+    try {
+      await api.revokeInvitation(id);
+      if (invitation?.id === id) invitation = null;
+      toast('Invitation revoked');
+      await loadInvitations();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+
+  function expiry(seconds) {
+    if (seconds == null) return 'never expires';
+    const left = seconds - Date.now() / 1000;
+    if (left <= 0) return 'expired';
+    if (left < 3600) return `expires in ${Math.ceil(left / 60)} min`;
+    if (left < 48 * 3600) return `expires in ${Math.round(left / 3600)} h`;
+    return `expires in ${Math.round(left / 86400)} days`;
+  }
 
   /** The invitation URL shortened in the middle: https://agent.didcomm.link/didcomm?oob=eyJ…Q30 */
   function truncateMiddle(url, head = 42, tail = 10) {
@@ -23,7 +66,7 @@
   }
 
   async function copyInvitation() {
-    copied = await copy(invitation.invitation_url);
+    copied = await copy(shareUrl);
     toast(copied ? 'Invitation copied' : 'Copy failed', copied ? 'info' : 'error');
     if (copied) setTimeout(() => (copied = false), 2000);
   }
@@ -41,7 +84,9 @@
   async function createInvitation() {
     creating = true;
     try {
-      invitation = await api.createInvitation();
+      invitation = await api.createInvitation(version, validity);
+      copied = false;
+      await loadInvitations();
     } catch (e) {
       toast(e.message, 'error');
     } finally {
@@ -74,7 +119,10 @@
     }
   }
 
-  onMount(load);
+  onMount(() => {
+    load();
+    loadInvitations();
+  });
 </script>
 
 <div class="page scroll-thin">
@@ -85,14 +133,26 @@
     <div class="card pad">
       <h3><Icon name="link" size={18} /> Invite someone</h3>
       <p class="muted">An out-of-band invitation for another agent to connect to this one.</p>
+      <div class="options">
+        <div class="seg" role="radiogroup" aria-label="DIDComm version">
+          <button type="button" role="radio" aria-checked={version === 'v2'} class:on={version === 'v2'} onclick={() => (version = 'v2')} title="Out-of-Band 2.0: the peer messages this agent's DID">DIDComm v2</button>
+          <button type="button" role="radio" aria-checked={version === 'v1'} class:on={version === 'v1'} onclick={() => (version = 'v1')} title="Out-of-Band 1.1 with DID Exchange (Aries agents)">DIDComm v1</button>
+        </div>
+        <select class="input expiry" bind:value={validity} aria-label="Short link validity">
+          {#each validities as [seconds, text]}<option value={seconds}>{text}</option>{/each}
+        </select>
+      </div>
       {#if invitation}
         <div class="invitation">
           <button class="qr-btn" onclick={() => (enlarged = true)} title="Show larger for scanning">
-            <QrCode value={invitation.invitation_url} size={280} label="Invitation QR code" />
+            <QrCode value={shareUrl} size={240} label="Invitation QR code" />
           </button>
-          <p class="muted scan">Scan with a DIDComm wallet (tap to enlarge), or share the link.</p>
+          <p class="muted scan">
+            <span class="pill accent">DIDComm {invitation.didcomm_version}</span>
+            {#if invitation.short_url}<span class="pill">{expiry(invitation.expires_time)}</span>{/if}
+          </p>
           <div class="invite">
-            <code title={invitation.invitation_url}>{truncateMiddle(invitation.invitation_url)}</code>
+            <code title={shareUrl}>{truncateMiddle(shareUrl)}</code>
             <button class="icon-btn" class:done={copied} onclick={copyInvitation} title="Copy invitation URL" aria-label="Copy invitation URL">
               <Icon name={copied ? 'check' : 'copy'} size={18} />
             </button>
@@ -104,7 +164,7 @@
     <form class="card pad" onsubmit={accept}>
       <h3><Icon name="plus" size={18} /> Accept an invitation</h3>
       <p class="muted">Paste an invitation URL or its JSON.</p>
-      <textarea class="input mono" rows="3" bind:value={incoming} placeholder="https://…?oob=…"></textarea>
+      <textarea class="input mono" rows="3" bind:value={incoming} placeholder="https://…?oob=…, ?_oob=…, ?_oobid=…"></textarea>
       <button class="btn primary" disabled={!incoming.trim() || accepting}>{accepting ? 'Connecting…' : 'Connect'}</button>
     </form>
   </div>
@@ -113,9 +173,28 @@
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div class="overlay" onclick={() => (enlarged = false)}>
       <div class="big" role="dialog" aria-label="Invitation QR code">
-        <QrCode value={invitation.invitation_url} size={Math.min(560, innerWidth - 48, innerHeight - 140)} label="Invitation QR code" />
+        <QrCode value={shareUrl} size={Math.min(560, innerWidth - 48, innerHeight - 140)} label="Invitation QR code" />
         <button class="btn" onclick={() => (enlarged = false)}><Icon name="x" size={16} /> Close</button>
       </div>
+    </div>
+  {/if}
+
+  {#if live.length}
+    <div class="section-title">{live.length} active invitation{live.length === 1 ? '' : 's'}</div>
+    <div class="card list">
+      {#each live as inv (inv.id)}
+        <div class="conn inv">
+          <span class="pill accent">{inv.didcomm_version}</span>
+          <div class="info">
+            <code class="mono" title={inv.short_url}>{truncateMiddle(inv.short_url, 46, 8)}</code>
+            <span class="muted small">{inv.label ?? 'didcomm-mcp'} · {when(inv.created_at)} · {expiry(inv.expires_time)}</span>
+          </div>
+          <div class="btns">
+            <button class="icon-btn" title="Copy" aria-label="Copy" onclick={() => copy(inv.short_url).then((ok) => toast(ok ? 'Copied' : 'Copy failed'))}><Icon name="copy" size={16} /></button>
+            <button class="btn small ghost danger" onclick={() => revoke(inv.id)}><Icon name="x" size={16} /> Revoke</button>
+          </div>
+        </div>
+      {/each}
     </div>
   {/if}
 
@@ -215,7 +294,56 @@
     color: #171a26;
     border-color: #e3e6ef;
   }
+  .options {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .seg {
+    display: inline-flex;
+    padding: 3px;
+    border-radius: 10px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+  }
+  .seg button {
+    border: none;
+    background: none;
+    padding: 0.35rem 0.75rem;
+    border-radius: 7px;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+  .seg button.on {
+    background: var(--panel);
+    color: var(--text);
+    box-shadow: var(--shadow);
+  }
+  .expiry {
+    width: auto;
+    padding: 0.4rem 0.6rem;
+    font-size: 0.88rem;
+  }
+  .inv {
+    padding: 0.75rem 1.25rem;
+  }
+  .inv code {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .small {
+    font-size: 0.8rem;
+  }
+  .danger:hover {
+    color: var(--bad);
+  }
   .scan {
+    display: flex;
+    gap: 0.4rem;
     font-size: 0.85rem;
     text-align: center;
   }

@@ -50,7 +50,8 @@ pub fn router(bridge: Arc<Bridge>) -> Router {
         .route("/api/profile/request", post(request_profile))
         .route("/api/connections", get(connections))
         .route("/api/connections/accept", post(accept_invitation))
-        .route("/api/invitations", post(create_invitation))
+        .route("/api/invitations", get(list_invitations).post(create_invitation))
+        .route("/api/invitations/revoke", post(revoke_invitation))
         .route("/api/conversations", get(conversations))
         .route("/api/messages", get(messages).post(send_message))
         .route("/api/read", post(mark_read))
@@ -198,9 +199,38 @@ async fn accept_invitation(State(api): State<Api>, Json(a): Json<Accept>) -> Res
     ok(api.bridge.accept_invitation(&a.invitation, label.as_deref()).await.map(|c| crate::bridge::connection_json(&c)))
 }
 
-async fn create_invitation(State(api): State<Api>) -> Response {
+#[derive(Deserialize, Default)]
+struct NewInvitation {
+    /// `"v1"` (default) or `"v2"`.
+    #[serde(default)]
+    didcomm_version: Option<String>,
+    /// How long the short URL lives (default 7 days; 0: until revoked).
+    #[serde(default)]
+    validity_seconds: Option<u64>,
+}
+
+async fn create_invitation(State(api): State<Api>, body: Option<Json<NewInvitation>>) -> Response {
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    let version = match body.didcomm_version.as_deref() {
+        None | Some("v1") => didcomm_agent::DidcommVersion::V1,
+        Some("v2") => didcomm_agent::DidcommVersion::V2,
+        Some(other) => return error(BridgeError::BadArgument(format!("didcomm_version must be v1 or v2, not {other}"))),
+    };
     let label = label(&api).await;
-    ok(api.bridge.create_invitation(label.as_deref()).await)
+    ok(api.bridge.create_invitation_with(label.as_deref(), version, body.validity_seconds).await)
+}
+
+async fn list_invitations(State(api): State<Api>) -> Response {
+    ok(api.bridge.short_urls().await)
+}
+
+#[derive(Deserialize)]
+struct Revoke {
+    id: String,
+}
+
+async fn revoke_invitation(State(api): State<Api>, Json(r): Json<Revoke>) -> Response {
+    ok(api.bridge.revoke_short_url(&r.id).await.map(|_| json!({"ok": true})))
 }
 
 async fn conversations(State(api): State<Api>) -> Response {

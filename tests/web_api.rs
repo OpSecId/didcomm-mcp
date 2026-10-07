@@ -284,6 +284,135 @@ async fn v1_connection_with_profile_and_chat() {
     assert_eq!(server.get("/api/messages?peer=did%3Apeer%3A2.Ez6LSbogus").await.1, json!([]));
 }
 
+#[tokio::test]
+async fn short_invitation_urls() {
+    let server = start_server(None).await;
+    let peer = start_peer().await;
+    server.put("/api/profile", json!({"displayName": "Main agent"})).await;
+    let no_redirects = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+
+    // DIDComm v2: OOB 2.0 from our DID, short URL with _oobid (DIDComm v2.1 spec).
+    let (status, v2) = server.post("/api/invitations", json!({"didcomm_version": "v2"})).await;
+    assert_eq!(status, 200, "{v2}");
+    let id = v2["id"].as_str().unwrap();
+    let short = v2["short_url"].as_str().unwrap();
+    assert_eq!(short, format!("{}/invitations?_oobid={id}", server.base));
+    assert!(v2["invitation_url"].as_str().unwrap().starts_with(&format!("{}/invitations?_oob=", server.base)));
+    assert_eq!(v2["invitation"]["type"], "https://didcomm.org/out-of-band/2.0/invitation");
+    assert_eq!(v2["invitation"]["from"], server.bridge.agent().did().as_str());
+    assert_eq!(v2["invitation"]["body"]["label"], "Main agent");
+    let expires = v2["expires_time"].as_i64().unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    assert!((expires - now - 7 * 24 * 3600).abs() < 60, "default 7 days");
+    assert!(short.len() < 100 && v2["invitation_url"].as_str().unwrap().len() > short.len() * 3);
+
+    // GET with Accept: application/json → the invitation; otherwise 302 → the long URL.
+    let json_answer: Value = no_redirects.get(short).header("accept", "application/json").send().await.unwrap().json().await.unwrap();
+    assert_eq!(json_answer, v2["invitation"]);
+    let redirect = no_redirects.get(short).send().await.unwrap();
+    assert_eq!(redirect.status(), 302);
+    assert_eq!(redirect.headers()["location"], v2["invitation_url"].as_str().unwrap());
+    // No auth needed, and the long v2 URL in a browser gets a page, not a 404.
+    assert_eq!(reqwest::get(v2["invitation_url"].as_str().unwrap()).await.unwrap().status(), 200);
+
+    // A peer accepts through the short URL alone (the library follows it), then messages us.
+    let invitation = peer.agent.fetch_invitation(short).await.unwrap();
+    let connection = peer.agent.accept_invitation(&invitation, "Bob").await.unwrap();
+    assert_eq!(connection.their_did.as_deref(), Some(server.bridge.agent().did().as_str()));
+    peer.agent.send(&server.bridge.agent().did(), &json!({"type": BASICMESSAGE, "body": {"content": "via short url"}})).await.unwrap();
+    let (_, conversations) = server.get("/api/conversations").await;
+    assert!(conversations.to_string().contains("via short url"), "{conversations}");
+
+    // DIDComm v1: OOB 1.1 for DID Exchange, short URL as a path (RFC 0434).
+    let (_, v1) = server.post("/api/invitations", json!({"validity_seconds": 0})).await;
+    let short1 = v1["short_url"].as_str().unwrap();
+    assert_eq!(short1, format!("{}/invitations/{}", server.base, v1["id"].as_str().unwrap()));
+    assert_eq!(v1["expires_time"], Value::Null, "0: until revoked");
+    assert!(v1["invitation_url"].as_str().unwrap().contains("/didcomm?oob="));
+    let theirs = peer.agent.accept_invitation(&peer.agent.fetch_invitation(short1).await.unwrap(), "Bob").await.unwrap();
+    assert_eq!(theirs.didcomm_version, didcomm_agent::DidcommVersion::V1);
+    // The forms don't cross: a v1 id isn't served as an _oobid.
+    let crossed = format!("{}/invitations?_oobid={}", server.base, v1["id"].as_str().unwrap());
+    assert_eq!(reqwest::get(&crossed).await.unwrap().status(), 404);
+
+    // Listed; revoking stops it resolving at once.
+    let (_, list) = server.get("/api/invitations").await;
+    assert_eq!(list.as_array().unwrap().len(), 2);
+    assert!(list.as_array().unwrap().iter().all(|s| s["live"] == true));
+    let (status, _) = server.post("/api/invitations/revoke", json!({"id": id})).await;
+    assert_eq!(status, 200);
+    assert_eq!(no_redirects.get(short).send().await.unwrap().status(), 404);
+    assert_eq!(server.post("/api/invitations/revoke", json!({"id": id})).await.0, 400, "already revoked");
+    let (_, list) = server.get("/api/invitations").await;
+    assert_eq!(list.as_array().unwrap().iter().find(|s| s["id"] == id).unwrap()["live"], false);
+
+    // Limits and bad input.
+    assert_eq!(server.post("/api/invitations", json!({"validity_seconds": 91 * 24 * 3600})).await.0, 400);
+    assert_eq!(server.post("/api/invitations", json!({"didcomm_version": "v3"})).await.0, 400);
+    assert_eq!(reqwest::get(format!("{}/invitations?_oobid=nope", server.base)).await.unwrap().status(), 404);
+    assert_eq!(reqwest::get(format!("{}/invitations/nope", server.base)).await.unwrap().status(), 404);
+}
+
+#[tokio::test]
+async fn expired_short_urls_stop_resolving() {
+    use didcomm_mcp::store::{ShortUrl, Store};
+    let dir = std::env::temp_dir().join(format!("didcomm-mcp-short-{}", uuid::Uuid::new_v4()));
+    let store = Store::files(&dir.join("identity.json"), &dir.join("state.json"));
+    let short = |id: &str, expires_at| ShortUrl {
+        id: id.into(),
+        didcomm_version: "v2".into(),
+        invitation: json!({}),
+        long_url: "https://x/invitations?_oob=e30".into(),
+        created_at: 100,
+        expires_at,
+        revoked: false,
+    };
+    store.put_short_url(&short("old", Some(150)), 120).await.unwrap();
+    store.put_short_url(&short("forever", None), 120).await.unwrap();
+    assert!(store.get_short_url("old").await.unwrap().unwrap().is_live(149));
+    assert!(!store.get_short_url("old").await.unwrap().unwrap().is_live(150));
+    // Storing another after it expired drops it.
+    store.put_short_url(&short("new", Some(1000)), 200).await.unwrap();
+    assert_eq!(store.get_short_url("old").await.unwrap(), None);
+    assert!(store.get_short_url("forever").await.unwrap().unwrap().is_live(i64::MAX - 1));
+    // Kept across a restart.
+    let reopened = Store::files(&dir.join("identity.json"), &dir.join("state.json"));
+    assert_eq!(reopened.list_short_urls().await.unwrap().len(), 2);
+}
+
+/// The same lifecycle on Postgres (skipped without TEST_DATABASE_URL).
+#[tokio::test]
+async fn short_urls_on_postgres() {
+    use didcomm_mcp::store::{ShortUrl, Store};
+    let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
+        eprintln!("skipping: TEST_DATABASE_URL isn't set");
+        return;
+    };
+    let store = Store::postgres(&url).await.unwrap();
+    let tag = uuid::Uuid::new_v4().to_string();
+    let short = |id: String, expires_at| ShortUrl {
+        id,
+        didcomm_version: "v2".into(),
+        invitation: json!({"type": "https://didcomm.org/out-of-band/2.0/invitation", "body": {"label": "pg"}}),
+        long_url: "https://x/invitations?_oob=e30".into(),
+        created_at: 100,
+        expires_at,
+        revoked: false,
+    };
+    let (old, live) = (format!("old-{tag}"), format!("live-{tag}"));
+    store.put_short_url(&short(old.clone(), Some(150)), 120).await.unwrap();
+    store.put_short_url(&short(live.clone(), None), 120).await.unwrap();
+    let got = store.get_short_url(&live).await.unwrap().unwrap();
+    assert_eq!(got.invitation["body"]["label"], "pg");
+    assert!(store.list_short_urls().await.unwrap().iter().any(|s| s.id == live));
+    assert!(store.revoke_short_url(&live).await.unwrap());
+    assert!(!store.revoke_short_url(&live).await.unwrap(), "already revoked");
+    assert!(!store.get_short_url(&live).await.unwrap().unwrap().is_live(0));
+    // A later insert sweeps the expired one.
+    store.put_short_url(&short(format!("new-{tag}"), None), 200).await.unwrap();
+    assert_eq!(store.get_short_url(&old).await.unwrap(), None);
+}
+
 fn urlencode(s: &str) -> String {
     s.bytes()
         .map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })

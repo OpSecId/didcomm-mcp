@@ -15,7 +15,20 @@ use serde_json::{json, Value};
 
 use crate::config::Config;
 use crate::profile::{self, Profile};
-use crate::store::Store;
+use crate::store::{ShortUrl, Store};
+
+/// Short URLs live 7 days unless asked otherwise, 90 at most.
+pub const DEFAULT_INVITATION_VALIDITY: u64 = 7 * 24 * 3600;
+pub const MAX_INVITATION_VALIDITY: u64 = 90 * 24 * 3600;
+
+/// The short URL for an invitation: `_oobid` (DIDComm v2) or a path (v1, RFC 0434).
+pub fn short_url_for(public: &str, short: &ShortUrl) -> String {
+    if short.didcomm_version == "v2" {
+        format!("{public}/invitations?_oobid={}", short.id)
+    } else {
+        format!("{public}/invitations/{}", short.id)
+    }
+}
 use didcomm_agent::v1::normalize_type;
 
 /// Where read markers live in the store.
@@ -673,19 +686,132 @@ impl Bridge {
     /// `create_invitation`: an out-of-band invitation to connect with this agent over
     /// DIDComm v1 (DID Exchange), as JSON and as a URL.
     pub async fn create_invitation(&self, label: Option<&str>) -> Result<Value, BridgeError> {
-        // Through the v1 mediator if there is one; else at this agent's own endpoint.
-        let base = match (self.ensure_v1_mediation().await, self.config.inbound_endpoint()) {
-            (Ok(mediation), _) => mediation.endpoint,
-            (Err(BridgeError::NoV1Mediator), Some(endpoint)) => endpoint,
-            (Err(e), _) => return Err(e),
+        self.create_invitation_with(label, DidcommVersion::V1, None).await
+    }
+
+    /// An out-of-band invitation, and with a public URL a short URL for it:
+    /// - v1: an OOB 1.1 invitation (DID Exchange) in an `oob` URL; the short URL is
+    ///   `<public>/invitations/<id>` (Aries RFC 0434: redirects to the long URL, or
+    ///   answers with the invitation's JSON).
+    /// - v2: an OOB 2.0 invitation from this agent's DID in an `_oob` URL; the short
+    ///   URL is `<public>/invitations?_oobid=<id>` (DIDComm v2 "Short URL Message
+    ///   Retrieval").
+    ///
+    /// The short URL lives `validity_seconds` (default 7 days, at most 90; `0`: until
+    /// revoked).
+    pub async fn create_invitation_with(&self, label: Option<&str>, version: DidcommVersion, validity_seconds: Option<u64>) -> Result<Value, BridgeError> {
+        let label = label.map(str::trim).filter(|l| !l.is_empty()).unwrap_or(DEFAULT_LABEL);
+        let validity = validity_seconds.unwrap_or(DEFAULT_INVITATION_VALIDITY);
+        if validity > MAX_INVITATION_VALIDITY {
+            return Err(BridgeError::BadArgument(format!("validity_seconds is at most {MAX_INVITATION_VALIDITY} (90 days)")));
+        }
+        let public = self.config.public_url.as_deref().map(|u| u.trim_end_matches('/').to_string());
+        let (invitation, long_url, note) = match version {
+            DidcommVersion::V1 => {
+                // Through the v1 mediator if there is one; else at this agent's own endpoint.
+                let base = match (self.ensure_v1_mediation().await, self.config.inbound_endpoint()) {
+                    (Ok(mediation), _) => mediation.endpoint,
+                    (Err(BridgeError::NoV1Mediator), Some(endpoint)) => endpoint,
+                    (Err(e), _) => return Err(e),
+                };
+                let invitation = self.agent.create_invitation(label)?;
+                self.save_state().await;
+                let url = Agent::invitation_url(&base, &invitation);
+                (invitation, url, "Any number of peers can accept it (DID Exchange). Their requests arrive at this agent: call fetch_messages, which completes the connections.")
+            }
+            DidcommVersion::V2 => {
+                // The invitee just messages this DID: it has to be reachable.
+                if !self.has_inbound() {
+                    self.ensure_mediation().await?;
+                }
+                let invitation = json!({
+                    "type": didcomm_agent::connections::OOB_2_0_INVITATION,
+                    "id": uuid::Uuid::new_v4().to_string(),
+                    "from": self.agent.did(),
+                    "body": {
+                        "goal_code": "connect",
+                        "goal": format!("Connect with {label}"),
+                        "label": label,
+                        "accept": ["didcomm/v2"],
+                    },
+                });
+                let base = match &public {
+                    Some(p) => format!("{p}/invitations"),
+                    None => "https://didcomm.link/invitations".into(),
+                };
+                let url = format!("{base}?_oob={}", didcomm_multiformats::multibase::encode(invitation.to_string()));
+                (invitation, url, "A DIDComm v2 invitation: whoever accepts it messages this agent's DID directly; no handshake.")
+            }
         };
-        let invitation = self.agent.create_invitation(label.unwrap_or(DEFAULT_LABEL))?;
-        self.save_state().await;
-        Ok(json!({
+        let mut result = json!({
+            "didcomm_version": version,
             "invitation": invitation,
-            "invitation_url": Agent::invitation_url(&base, &invitation),
-            "note": "Any number of peers can accept it. Their requests arrive at this agent: call fetch_messages, which completes the connections.",
-        }))
+            "invitation_url": long_url,
+            "note": note,
+        });
+        if let Some(public) = public {
+            let now = now() as i64;
+            let id = uuid::Uuid::new_v4().to_string();
+            let short = ShortUrl {
+                id: id.clone(),
+                didcomm_version: match version {
+                    DidcommVersion::V1 => "v1".into(),
+                    DidcommVersion::V2 => "v2".into(),
+                },
+                invitation,
+                long_url,
+                created_at: now,
+                expires_at: (validity > 0).then(|| now + validity as i64),
+                revoked: false,
+            };
+            self.store.put_short_url(&short, now).await.map_err(storage)?;
+            result["id"] = json!(id);
+            result["short_url"] = json!(short_url_for(&public, &short));
+            result["expires_time"] = json!(short.expires_at);
+        }
+        Ok(result)
+    }
+
+    /// The invitation behind a short URL id, if it's live.
+    pub async fn short_url(&self, id: &str) -> Result<Option<ShortUrl>, BridgeError> {
+        let found = self.store.get_short_url(id).await.map_err(storage)?;
+        Ok(found.filter(|s| s.is_live(now() as i64)))
+    }
+
+    /// Short URLs for the web UI: live ones, then recently ended ones.
+    pub async fn short_urls(&self) -> Result<Value, BridgeError> {
+        let now = now() as i64;
+        let public = self.config.public_url.as_deref().map(|u| u.trim_end_matches('/').to_string()).unwrap_or_default();
+        let list: Vec<Value> = self
+            .store
+            .list_short_urls()
+            .await
+            .map_err(storage)?
+            .into_iter()
+            .map(|s| {
+                json!({
+                    "id": s.id,
+                    "didcomm_version": s.didcomm_version,
+                    "short_url": short_url_for(&public, &s),
+                    "invitation_url": s.long_url,
+                    "label": s.invitation["label"].as_str().or(s.invitation["body"]["label"].as_str()),
+                    "created_at": s.created_at,
+                    "expires_time": s.expires_at,
+                    "revoked": s.revoked,
+                    "live": s.is_live(now),
+                })
+            })
+            .collect();
+        Ok(json!(list))
+    }
+
+    /// Revoke a short URL: it stops resolving at once.
+    pub async fn revoke_short_url(&self, id: &str) -> Result<(), BridgeError> {
+        if self.store.revoke_short_url(id).await.map_err(storage)? {
+            Ok(())
+        } else {
+            Err(BridgeError::BadArgument(format!("no live short URL {id}")))
+        }
     }
 
     /// `list_connections`.

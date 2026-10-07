@@ -42,7 +42,9 @@ export const api = {
   requestProfile: (target) => request('POST', '/api/profile/request', { target }),
   connections: () => request('GET', '/api/connections'),
   acceptInvitation: (invitation) => request('POST', '/api/connections/accept', { invitation }),
-  createInvitation: () => request('POST', '/api/invitations', {}),
+  createInvitation: (didcomm_version = 'v1', validity_seconds) => request('POST', '/api/invitations', { didcomm_version, validity_seconds }),
+  invitations: () => request('GET', '/api/invitations'),
+  revokeInvitation: (id) => request('POST', '/api/invitations/revoke', { id }),
   conversations: () => request('GET', '/api/conversations'),
   messages: (peer, params = {}) => {
     const q = new URLSearchParams({ peer, ...Object.fromEntries(Object.entries(params).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)])) });
