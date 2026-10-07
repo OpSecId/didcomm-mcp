@@ -23,6 +23,7 @@ no mediator, and keeps everything in Postgres, so it needs no volume.
    | Variable | Default | |
    |---|---|---|
    | `DIDCOMM_MCP_PUBLIC_URL` | `https://$RAILWAY_PUBLIC_DOMAIN` | Set for a custom domain. |
+   | `DIDCOMM_MCP_DID_METHOD` | `peer` | `web`: the agent is `did:web:<host>` and serves `/.well-known/did.json`. |
    | `DIDCOMM_MCP_HTTP_ALLOWED_HOSTS` | the public URL's host | Comma-separated. |
    | `DIDCOMM_MCP_MEDIATOR_DID` | Indicio's public mediator | `""` for none: the server is reachable at its own endpoint. |
    | `DIDCOMM_MCP_V1_MEDIATOR` | `DIDCOMM_MCP_MEDIATOR_DID` | `""` for none: invitations use the server's own endpoint. |
@@ -37,8 +38,11 @@ no mediator, and keeps everything in Postgres, so it needs no volume.
 
 ## Notes
 
-- **The DID follows the URL.** It's a `did:peer` naming `<public_url>/didcomm`;
-  changing the domain changes the DID, and peers must be given the new one.
+- **The DID.** By default a `did:peer` naming `<public_url>/didcomm`: changing the
+  domain changes it. With `DIDCOMM_MCP_DID_METHOD=web` it's `did:web:<host>`, resolved
+  from `https://<host>/.well-known/did.json`, which this service serves: it survives
+  endpoint changes, but it's only as trustworthy as the domain's DNS and TLS. Either
+  way, pick before handing the DID out: switching changes it.
 - **The database holds the private keys** (`didcomm_mcp_kv`, key `identity`), in the
   clear, as the identity file does. Don't share the database; back it up to keep the
   DID.

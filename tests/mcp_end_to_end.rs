@@ -208,6 +208,7 @@ async fn world_with(registry_answers: fn(&Received) -> Option<Value>, customize:
         validate_messages: true,
         public_url: None,
         database_url: None,
+        did_method: Default::default(),
         http: Default::default(),
     };
     customize(&mut config);

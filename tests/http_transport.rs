@@ -57,6 +57,7 @@ async fn start_server() -> String {
         validate_messages: true,
         public_url: None,
         database_url: None,
+        did_method: Default::default(),
         http: http_config.clone(),
     };
     let bridge = Arc::new(Bridge::new(Agent::new(Identity::generate().unwrap()).unwrap(), config).await);

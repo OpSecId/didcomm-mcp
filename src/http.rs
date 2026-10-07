@@ -70,6 +70,13 @@ pub fn router(bridge: Arc<Bridge>, http: &HttpConfig) -> Router {
         mcp = mcp.layer(middleware::from_fn_with_state(Arc::<str>::from(token.as_str()), require_token));
     }
     if let Some(bridge) = inbound {
+        if let (Some(document), Some(path)) = (bridge.did_document(), bridge.config().did_document_path()) {
+            let document = Arc::new(document);
+            mcp = mcp.route(&path, get(move || {
+                let document = document.clone();
+                async move { ([(header::CONTENT_TYPE, "application/did+json")], axum::Json((*document).clone())) }
+            }));
+        }
         let didcomm = Router::new()
             .route(DIDCOMM_PATH, post(receive_didcomm))
             .layer(axum::extract::DefaultBodyLimit::max(MAX_DIDCOMM_BYTES))

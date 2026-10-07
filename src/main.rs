@@ -2,7 +2,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use didcomm_agent::{Agent, Features};
+use didcomm_agent::Features;
 use didcomm_mcp::{bridge::Bridge, config::Config, server::DidcommMcp, store::Store};
 use rmcp::ServiceExt;
 
@@ -106,15 +106,10 @@ pub async fn run(args: Args, shutdown: impl Future<Output = ()> + Send + 'static
     };
     let identity = store.load_or_generate_identity().await?;
     // With a public URL, the DID names this server's own /didcomm endpoint.
-    let agent = match config.inbound_endpoint() {
-        Some(endpoint) => {
-            if args.http.is_none() {
-                tracing::warn!("public_url is set, but DIDComm messages are only received with --http");
-            }
-            Agent::with_endpoint(identity, &endpoint)?
-        }
-        None => Agent::new(identity)?,
-    };
+    let agent = didcomm_mcp::bridge::agent_for(identity, &config)?;
+    if config.inbound_endpoint().is_some() && args.http.is_none() {
+        tracing::warn!("public_url is set, but DIDComm messages are only received with --http");
+    }
     tracing::info!(storage = store.kind(), endpoint = ?config.inbound_endpoint(), "configured");
     let bridge = Arc::new(Bridge::with_store(agent.with_features(Features::standard().with_v1()), config, store).await?);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), did = %bridge.agent().base_did(), "didcomm-mcp starting");
@@ -125,6 +120,8 @@ pub async fn run(args: Args, shutdown: impl Future<Output = ()> + Send + 'static
     tokio::spawn(async move {
         match background.ensure_mediation().await {
             Ok(m) => tracing::info!(did = %m.did, mediator = %m.mediator_did, "mediated"),
+            // Reachable at its own endpoint instead: nothing to warn about.
+            Err(didcomm_mcp::bridge::BridgeError::NoMediator) if background.config().inbound_endpoint().is_some() => {}
             Err(e) => tracing::warn!("{e}"),
         }
         match background.ensure_v1_mediation().await {

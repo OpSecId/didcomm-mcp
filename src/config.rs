@@ -9,6 +9,17 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+/// How the agent's DID is made (`did_method`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DidMethod {
+    /// `did:peer:4`, naming the endpoint (or the mediator's routing DID).
+    #[default]
+    Peer,
+    /// `did:web` for `public_url`, whose document this server publishes.
+    Web,
+}
+
 /// The documentation/1.0 registry the lookup tools ask by default.
 pub const DEFAULT_REGISTRY: &str = "did:web:docs.wyvrn.app";
 
@@ -49,6 +60,10 @@ pub struct Config {
     /// A Postgres URL. If set, the identity, the state and the inbox live in the
     /// database instead of `identity_path` / `state_path`.
     pub database_url: Option<String>,
+    /// How the agent's DID is made when `public_url` is set: a `did:peer:4` naming the
+    /// endpoint (default), or a `did:web` for the public URL's host (and path), whose
+    /// document `--http` serves itself.
+    pub did_method: DidMethod,
     /// The Streamable HTTP transport (`--http`).
     pub http: HttpConfig,
 }
@@ -100,6 +115,7 @@ struct ConfigFile {
     validate_messages: Option<bool>,
     public_url: Option<String>,
     database_url: Option<String>,
+    did_method: Option<DidMethod>,
     #[serde(default)]
     http: HttpFile,
 }
@@ -170,7 +186,45 @@ impl Config {
                 .or_else(|| env("DATABASE_URL"))
                 .or(file.database_url)
                 .filter(|u| !u.trim().is_empty()),
+            did_method: env("DIDCOMM_MCP_DID_METHOD")
+                .and_then(|m| match m.trim().to_ascii_lowercase().as_str() {
+                    "web" => Some(DidMethod::Web),
+                    "peer" | "" => Some(DidMethod::Peer),
+                    other => {
+                        tracing::warn!("ignoring DIDCOMM_MCP_DID_METHOD={other:?} (expected peer or web)");
+                        None
+                    }
+                })
+                .or(file.did_method)
+                .unwrap_or_default(),
         }
+    }
+
+    /// The agent's `did:web`, if `did_method` is `web` and `public_url` is set:
+    /// `https://host[:port][/path]` becomes `did:web:host[%3Aport][:path...]`.
+    pub fn web_did(&self) -> Option<String> {
+        if self.did_method != DidMethod::Web {
+            return None;
+        }
+        let url = self.public_url.as_deref()?;
+        let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let mut did = format!("did:web:{}", authority.replace(':', "%3A"));
+        for segment in path.split('/').filter(|s| !s.is_empty()) {
+            did.push(':');
+            did.push_str(segment);
+        }
+        Some(did)
+    }
+
+    /// Where `--http` serves the `did:web` document, relative to `public_url`:
+    /// `/.well-known/did.json`, or `/did.json` under a path (did:web's mapping).
+    pub fn did_document_path(&self) -> Option<String> {
+        self.web_did()?;
+        let url = self.public_url.as_deref()?;
+        let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+        let has_path = rest.split_once('/').is_some_and(|(_, p)| !p.trim_matches('/').is_empty());
+        Some(if has_path { "/did.json".into() } else { "/.well-known/did.json".into() })
     }
 
     /// Where peers deliver DIDComm messages, if [`public_url`](Self::public_url) is set.
@@ -256,6 +310,20 @@ mod tests {
         let config = resolve("", &[("DIDCOMM_MCP_DATABASE_URL", "postgres://mine/db"), ("DATABASE_URL", "postgres://h/db")]);
         assert_eq!(config.database_url.as_deref(), Some("postgres://mine/db"));
         assert_eq!(resolve("", &[("DIDCOMM_MCP_PUBLIC_URL", " ")]).public_url, None);
+    }
+
+    #[test]
+    fn did_web_from_the_public_url() {
+        assert_eq!(resolve("", &[("DIDCOMM_MCP_PUBLIC_URL", "https://agent.didcomm.link")]).web_did(), None, "peer by default");
+        let web = |url: &str| {
+            let c = resolve("", &[("DIDCOMM_MCP_PUBLIC_URL", url), ("DIDCOMM_MCP_DID_METHOD", "web")]);
+            (c.web_did().unwrap(), c.did_document_path().unwrap())
+        };
+        assert_eq!(web("https://agent.didcomm.link/"), ("did:web:agent.didcomm.link".into(), "/.well-known/did.json".into()));
+        assert_eq!(web("http://127.0.0.1:8090"), ("did:web:127.0.0.1%3A8090".into(), "/.well-known/did.json".into()));
+        assert_eq!(web("https://didcomm.link/agents/alice"), ("did:web:didcomm.link:agents:alice".into(), "/did.json".into()));
+        assert_eq!(resolve("did_method = \"web\"", &[]).web_did(), None, "needs a public_url");
+        assert_eq!(resolve("did_method = \"web\"", &[]).did_method, DidMethod::Web);
     }
 
     #[test]

@@ -8,7 +8,10 @@
   `create_invitation` uses the endpoint when there's no v1 mediator.
 - Postgres storage: with `database_url` (or `DATABASE_URL`), the identity, state and
   inbox are kept in the database instead of files.
-- `get_identity` reports the `endpoint` and the `storage` in use.
+- `did_method = "web"`: the agent is `did:web:<public_url host[:path]>` and serves its
+  own DID document (`/.well-known/did.json`, or `/did.json` under a path). Default
+  stays `peer`.
+- `get_identity` reports the `endpoint`, the `storage` and the `did_method` in use.
 - Railway: `Dockerfile.railway`, `railway-start.sh`, `railway.toml`; see
   [docs/railway.md](docs/railway.md).
 

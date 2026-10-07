@@ -94,6 +94,7 @@ fn config(base: &str, database_url: Option<String>) -> Config {
         validate_messages: true,
         public_url: Some(base.to_string()),
         database_url,
+        did_method: Default::default(),
         http: HttpConfig { bind: "127.0.0.1:0".into(), auth_token: Some("t".into()), allowed_hosts: None },
     }
 }
@@ -236,6 +237,88 @@ async fn receives_directly_with_postgres() {
     let queued: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {schema}.didcomm_mcp_inbox")).fetch_one(&admin).await.unwrap();
     assert_eq!(queued, 0);
     sqlx::raw_sql(&format!("DROP SCHEMA {schema} CASCADE")).execute(&admin).await.unwrap();
+}
+
+#[tokio::test]
+async fn publishes_its_did_web_document() {
+    let (first, base) = listener().await;
+    let mut config = config(&base, None);
+    config.did_method = didcomm_mcp::config::DidMethod::Web;
+    let store = Store::files(&config.identity_path, &config.state_path);
+    let identity = store.load_or_generate_identity().await.unwrap();
+    let agent = didcomm_mcp::bridge::agent_for(identity.clone(), &config).unwrap();
+    let bridge = Arc::new(Bridge::with_store(agent, config.clone(), store).await.unwrap());
+    let app = http::router(bridge.clone(), &config.http);
+    tokio::spawn(async move { axum::serve(first, app).await });
+
+    let did = config.web_did().unwrap();
+    assert!(did.starts_with("did:web:127.0.0.1%3A"), "{did}");
+    assert_eq!(bridge.agent().base_did(), did);
+    assert_eq!(bridge.agent().did(), did, "no mediator: peers use the did:web");
+
+    let response = reqwest::get(format!("{base}/.well-known/did.json")).await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-type"], "application/did+json");
+    let document: Value = response.json().await.unwrap();
+    assert_eq!(document, identity.did_document(&did, &format!("{base}/didcomm")));
+    assert_eq!(document["id"], did.as_str());
+    assert_eq!(document["keyAgreement"][0], format!("{did}#key-2"), "the kid the agent decrypts with");
+    assert_eq!(document["service"][0]["serviceEndpoint"]["uri"], format!("{base}/didcomm"));
+
+    // The same keys as the did:peer it would otherwise have.
+    let peer_did = identity.did(&format!("{base}/didcomm")).unwrap();
+    let peer_doc = didcomm_resolver_peer::peer4::resolve(&peer_did).unwrap();
+    let keys = |d: &Value| d["verificationMethod"].as_array().unwrap().iter().map(|m| m["publicKeyMultibase"].clone()).collect::<Vec<_>>();
+    assert_eq!(keys(&document), keys(&peer_doc));
+}
+
+/// Against a real deployment behind HTTPS (`DID_WEB_E2E_MCP_URL`, `DID_WEB_E2E_TOKEN`;
+/// the CA must be trusted, and `DID_WEB_E2E_PEER_URL` must be where the server can
+/// reach this test's peer): a peer resolves the server's did:web to message it, and the
+/// server messages the peer from its did:web. Skipped unless the variables are set.
+#[tokio::test]
+async fn did_web_end_to_end_over_https() {
+    let (Ok(mcp_url), Ok(token), Ok(peer_url)) =
+        (std::env::var("DID_WEB_E2E_MCP_URL"), std::env::var("DID_WEB_E2E_TOKEN"), std::env::var("DID_WEB_E2E_PEER_URL"))
+    else {
+        eprintln!("DID_WEB_E2E_* not set: skipping the did:web end-to-end test");
+        return;
+    };
+    use rmcp::transport::{streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport};
+    let transport = StreamableHttpClientTransport::from_config(StreamableHttpClientTransportConfig::with_uri(mcp_url).auth_header(token));
+    let client = TestClient.serve(transport).await.unwrap();
+
+    let identity = data(&call(&client, "get_identity", json!({})).await);
+    assert_eq!(identity["did_method"], "web", "{identity}");
+    let did = identity["did"].as_str().unwrap().to_string();
+    assert!(did.starts_with("did:web:"), "{did}");
+
+    // A peer reachable by the server (it binds 0.0.0.0, and is named by DID_WEB_E2E_PEER_URL).
+    let port: u16 = peer_url.rsplit(':').next().unwrap().trim_end_matches('/').parse().unwrap();
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await.unwrap();
+    let peer = Arc::new(Agent::with_endpoint(Identity::generate().unwrap(), &peer_url).unwrap().with_features(Features::standard()));
+    let handler = |State(agent): State<Arc<Agent>>, body: Bytes| async move {
+        let received = agent.receive(&body).await.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        let Some(reply) = agent.auto_reply(&received) else { return Ok(Vec::new()) };
+        let packed = agent.respond(&received, &reply).await.map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+        Ok::<_, (StatusCode, String)>(packed.unwrap_or_default())
+    };
+    let app = Router::new().route("/", post(handler)).with_state(peer.clone());
+    tokio::spawn(async move { axum::serve(listener, app).await });
+
+    // Peer -> server: resolving the did:web (HTTPS) to encrypt to its key and find /didcomm.
+    peer.send(&did, &json!({"type": BASICMESSAGE, "body": {"content": "to your did:web"}})).await.unwrap();
+    let fetched = data(&call(&client, "fetch_messages", json!({})).await);
+    assert_eq!(fetched["messages"][0]["message"]["body"]["content"], "to your did:web", "{fetched}");
+    assert_eq!(fetched["messages"][0]["message"]["to"][0], did.as_str());
+
+    // Server -> peer, from the did:web: the peer resolves it to verify the sender and
+    // encrypt its ping-response back.
+    let ping = data(&call(&client, "send_didcomm_message", json!({
+        "target_did": peer.did(), "type": features::TRUST_PING_PING, "body": {}, "wait_for_reply": true,
+    })).await);
+    assert_eq!(ping["sent"]["from"], did.as_str(), "{ping}");
+    assert_eq!(ping["reply"]["message"]["type"], features::TRUST_PING_RESPONSE, "{ping}");
 }
 
 #[derive(Clone, Default)]

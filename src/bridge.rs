@@ -134,6 +134,18 @@ impl KnownType {
     }
 }
 
+/// The agent for `identity` under `config`: reachable at its own endpoint when
+/// `public_url` is set -- under a `did:web` (`did_method = "web"`) whose document
+/// `--http` serves, or a `did:peer:4` naming the endpoint -- else with no endpoint
+/// (mediation, or replies on the connection, only).
+pub fn agent_for(identity: didcomm_agent::Identity, config: &Config) -> Result<Agent, AgentError> {
+    Ok(match (config.inbound_endpoint(), config.web_did()) {
+        (Some(endpoint), Some(did)) => Agent::with_did(identity, &did).with_v1_endpoint(&endpoint),
+        (Some(endpoint), None) => Agent::with_endpoint(identity, &endpoint)?,
+        (None, _) => Agent::new(identity)?,
+    })
+}
+
 /// What the state file keeps: connections and the v1 mediation.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct State {
@@ -201,6 +213,13 @@ impl Bridge {
         if let Err(e) = saved {
             tracing::warn!("can't save the state ({}): {e:#}", self.store.kind());
         }
+    }
+
+    /// The `did:web` document `--http` publishes, when the agent has one.
+    pub fn did_document(&self) -> Option<Value> {
+        let did = self.config.web_did()?;
+        let endpoint = self.config.inbound_endpoint()?;
+        Some(self.agent.identity().did_document(&did, &endpoint))
     }
 
     /// Whether peers can deliver to this agent's own endpoint (`public_url`).
@@ -325,6 +344,7 @@ impl Bridge {
             "can_receive": self.agent.mediation().is_some() || self.has_inbound(),
             "endpoint": self.config.inbound_endpoint(),
             "storage": self.store.kind(),
+            "did_method": if self.config.web_did().is_some() { "web" } else { "peer" },
             "didcomm_v1": {
                 "did": self.agent.v1_did(),
                 "verkey": self.agent.v1_verkey(),

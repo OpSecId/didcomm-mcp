@@ -47,4 +47,5 @@ base64 = "0.22"
 reqwest = { version = "0.13", features = ["json"] }
 didcomm-mediator-core = { git = "https://github.com/wyvrn-cloud/didcomm", rev = "4ba7a14f439b47861ac10efad320cfc03acb378c" }
 didcomm-quickstart = { git = "https://github.com/wyvrn-cloud/didcomm", rev = "4ba7a14f439b47861ac10efad320cfc03acb378c" }
+didcomm-resolver-peer = { git = "https://github.com/wyvrn-cloud/didcomm", rev = "4ba7a14f439b47861ac10efad320cfc03acb378c" }
 rmcp = { version = "3.5", features = ["client", "transport-async-rw", "transport-streamable-http-client-reqwest"] }

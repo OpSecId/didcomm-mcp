@@ -1136,6 +1136,7 @@ dependencies = [
  "didcomm-agent",
  "didcomm-mediator-core",
  "didcomm-quickstart",
+ "didcomm-resolver-peer",
  "jsonschema",
  "reqwest",
  "rmcp",
