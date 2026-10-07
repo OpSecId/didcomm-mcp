@@ -34,7 +34,8 @@ no mediator, and keeps everything in Postgres, so it needs no volume.
    self-contained deployment, set both mediator variables to `""`.
 
 5. Deploy. Check `https://<domain>/healthz` (→ `ok`), then connect an MCP client to
-   `https://<domain>/mcp` with `Authorization: Bearer <token>`.
+   `https://<domain>/mcp` with `Authorization: Bearer <token>`. The web UI is at
+   `https://<domain>/`: sign in with the same token ([docs/web-ui.md](web-ui.md)).
 
 ## Notes
 

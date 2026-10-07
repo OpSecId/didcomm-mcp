@@ -17,6 +17,14 @@
 #   DIDCOMM_MCP_HTTP_ALLOWED_HOSTS  defaults to the public URL's host
 #   DIDCOMM_MCP_MEDIATOR_DID / DIDCOMM_MCP_V1_MEDIATOR / DIDCOMM_MCP_REGISTRY_DID: see
 #                             README ("" disables each)
+# The web UI (Svelte), embedded in the binary.
+FROM node:22-bookworm-slim AS ui
+WORKDIR /ui
+COPY ui/package.json ui/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY ui ./
+RUN npm run build
+
 FROM rust:1-slim-bookworm AS builder
 
 # git: cargo fetches the didcomm git dependency with the git CLI (.cargo/config.toml).
@@ -27,7 +35,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends git cmake gcc p
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY .cargo .cargo
+COPY build.rs build.rs
 COPY src src
+COPY --from=ui /ui/dist ui/dist
 
 # aws-lc-rs' cmake build ignores cargo's -j; cap it so constrained builders don't OOM.
 ENV CMAKE_BUILD_PARALLEL_LEVEL=2

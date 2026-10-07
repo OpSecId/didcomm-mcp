@@ -56,6 +56,7 @@ pub fn check(http: &HttpConfig) -> anyhow::Result<SocketAddr> {
 /// unauthenticated `GET /healthz`.
 pub fn router(bridge: Arc<Bridge>, http: &HttpConfig) -> Router {
     let inbound = bridge.config().inbound_endpoint().is_some().then(|| bridge.clone());
+    let bridge_for_api = bridge.clone();
     let mut config = StreamableHttpServerConfig::default();
     if let Some(hosts) = &http.allowed_hosts {
         config = config.with_allowed_hosts(hosts.clone());
@@ -83,7 +84,9 @@ pub fn router(bridge: Arc<Bridge>, http: &HttpConfig) -> Router {
             .with_state(bridge);
         mcp = mcp.merge(didcomm);
     }
-    mcp.route("/healthz", get(|| async { "ok" }))
+    mcp.merge(crate::api::router(bridge_for_api))
+        .route("/healthz", get(|| async { "ok" }))
+        .fallback(crate::web::serve)
 }
 
 /// `POST /didcomm`: a packed DIDComm message (v1 or v2) for this agent.

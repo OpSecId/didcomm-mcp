@@ -1,3 +1,5 @@
 target/
 **/.git
 .ci/
+ui/node_modules/
+ui/dist/

@@ -14,7 +14,49 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::config::Config;
+use crate::profile::{self, Profile};
 use crate::store::Store;
+use didcomm_agent::v1::normalize_type;
+
+/// Where read markers live in the store.
+const READ_KEY: &str = "read";
+
+fn storage(e: anyhow::Error) -> BridgeError {
+    BridgeError::Storage(format!("{e:#}"))
+}
+
+/// Message types that make up a conversation in the web UI: everything but the
+/// plumbing (handshakes, mediation, pickup, pings, feature discovery, profiles,
+/// receipts, and the registry's documentation exchange).
+fn is_conversation(message_type: &str) -> bool {
+    const PLUMBING: [&str; 12] = [
+        "https://didcomm.org/didexchange/",
+        "https://didcomm.org/out-of-band/",
+        "https://didcomm.org/connections/",
+        "https://didcomm.org/coordinate-mediation/",
+        "https://didcomm.org/messagepickup/",
+        "https://didcomm.org/routing/",
+        "https://didcomm.org/trust_ping/",
+        "https://didcomm.org/trust-ping/",
+        "https://didcomm.org/discover-features/",
+        "https://didcomm.org/discover_features/",
+        "https://didcomm.org/user-profile/",
+        "https://wyvrn.app/documentation/",
+    ];
+    !PLUMBING.iter().any(|p| message_type.starts_with(p))
+}
+
+/// A database URL without its password.
+fn redact_url(url: &str) -> String {
+    match (url.find("://"), url.rfind('@')) {
+        (Some(scheme), Some(at)) if at > scheme => {
+            let credentials = &url[scheme + 3..at];
+            let user = credentials.split(':').next().unwrap_or_default();
+            format!("{}{user}:***{}", &url[..scheme + 3], &url[at..])
+        }
+        _ => url.to_string(),
+    }
+}
 
 /// The documentation protocol this bridge speaks, and the version it falls back to for
 /// registries that don't know it yet.
@@ -76,8 +118,11 @@ pub struct Bridge {
     /// Serializes mediation attempts; the outcome itself lives in the agent.
     mediating: tokio::sync::Mutex<()>,
     mediating_v1: tokio::sync::Mutex<()>,
-    /// Identity, state and inbox: files or Postgres.
+    /// Identity, state, inbox, history and settings: files or Postgres.
     store: Store,
+    /// Serializes pickups from the mediators.
+    collecting: tokio::sync::Mutex<()>,
+    started: std::time::Instant,
     /// Serializes writes of the state.
     saving: tokio::sync::Mutex<()>,
     /// Message type → what the registry says about it (`None`: it doesn't know it).
@@ -183,6 +228,8 @@ impl Bridge {
             agent,
             config,
             store,
+            collecting: tokio::sync::Mutex::new(()),
+            started: std::time::Instant::now(),
             mediating: tokio::sync::Mutex::new(()),
             mediating_v1: tokio::sync::Mutex::new(()),
             saving: tokio::sync::Mutex::new(()),
@@ -234,12 +281,23 @@ impl Bridge {
     /// the sender asked for one (`return_route`).
     pub async fn deliver(&self, packed: &[u8]) -> Result<Option<Vec<u8>>, BridgeError> {
         let received = self.agent.receive(packed).await?;
-        let mut entry = self.received_json(&received);
-        entry["via"] = json!("endpoint");
+        self.take_in(&received, "endpoint", true).await
+    }
+
+    /// Everything done with a received message, however it arrived: take DID Exchange
+    /// a step further, answer and store user profiles, auto-reply to trust-pings and
+    /// feature queries, record it in the history (the web UI's conversations), and
+    /// queue it for `fetch_messages` (unless `queue` is false: a reply already handed
+    /// back by `wait_for_reply`). Returns a reply to write back on the connection, if
+    /// the sender asked for one.
+    async fn take_in(&self, received: &Received, via: &str, queue: bool) -> Result<Option<Vec<u8>>, BridgeError> {
+        let mut entry = self.received_json(received);
+        entry["via"] = json!(via);
         let mut on_connection = None;
-        if Agent::is_connection_message(&received) {
-            let outcome = match self.agent.handle_connection_message(&received).await {
-                Ok(Some(reply)) => self.agent.respond(&received, &reply).await.map(|packed| on_connection = packed),
+        let message_type = normalize_type(received.message_type());
+        if Agent::is_connection_message(received) {
+            let outcome = match self.agent.handle_connection_message(received).await {
+                Ok(Some(reply)) => self.agent.respond(received, &reply).await.map(|packed| on_connection = packed),
                 Ok(None) => Ok(()),
                 Err(e) => Err(e),
             };
@@ -248,13 +306,248 @@ impl Bridge {
                 Ok(()) => json!("handled; see list_connections"),
                 Err(e) => json!(format!("failed: {e}")),
             };
-        } else if let Some(reply) = self.agent.auto_reply(&received) {
-            let outcome = self.agent.respond(&received, &reply).await;
+        } else if message_type == profile::PROFILE || message_type == profile::REQUEST_PROFILE {
+            match self.take_in_profile(received, &message_type).await {
+                Ok(packed) => {
+                    on_connection = packed;
+                    entry["profile"] = json!("handled; see the peer's profile");
+                }
+                Err(e) => entry["profile"] = json!(format!("failed: {e}")),
+            }
+        } else if let Some(reply) = self.agent.auto_reply(received) {
+            let outcome = self.agent.respond(received, &reply).await;
             entry["auto_replied"] = json!(outcome.is_ok());
             on_connection = outcome.ok().flatten();
+        } else if is_conversation(&message_type) {
+            let at = received.message["created_time"].as_i64().unwrap_or_else(|| now() as i64);
+            let peer = self.peer_key_of(received);
+            if let Err(e) = self.store.record(&peer, "in", at, entry.clone()).await {
+                tracing::warn!("can't record a received message: {e:#}");
+            }
         }
-        self.store.push_inbox(entry).await.map_err(|e| BridgeError::Storage(format!("{e:#}")))?;
+        if queue {
+            self.store.push_inbox(entry).await.map_err(storage)?;
+        }
         Ok(on_connection)
+    }
+
+    /// A `profile` (stored as the sender's; ours sent back if asked) or a
+    /// `request-profile` (ours sent back).
+    async fn take_in_profile(&self, received: &Received, message_type: &str) -> Result<Option<Vec<u8>>, BridgeError> {
+        let version = received.version;
+        let message_id = received.message.get("id").or(received.message.get("@id")).and_then(Value::as_str).map(str::to_string);
+        let (query, send_ours) = if message_type == profile::PROFILE {
+            let peer = self.peer_key_of(received);
+            let mut peers: HashMap<String, Profile> = self.store.get_json(profile::PEERS_KEY).await.map_err(storage)?.unwrap_or_default();
+            let updated = profile::apply_profile(peers.remove(&peer), &received.message, version, now() as i64);
+            peers.insert(peer, updated);
+            self.store.put_json(profile::PEERS_KEY, &peers).await.map_err(storage)?;
+            (None, profile::wants_ours_back(&received.message, version))
+        } else {
+            (profile::requested_fields(&received.message, version), true)
+        };
+        if !send_ours {
+            return Ok(None);
+        }
+        // A new instance of the protocol, its parent the message that asked.
+        let ours = self.profile().await?;
+        let (body, attachments) = profile::profile_message(&ours, query.as_deref(), false, version);
+        let reply = match version {
+            DidcommVersion::V2 => {
+                let mut reply = json!({"type": profile::PROFILE, "body": body});
+                if let Some(id) = &message_id {
+                    reply["pthid"] = json!(id);
+                }
+                if let Some(attachments) = attachments {
+                    reply["attachments"] = attachments;
+                }
+                reply
+            }
+            DidcommVersion::V1 => {
+                let mut reply = body;
+                reply["@type"] = json!(profile::PROFILE);
+                reply["@id"] = json!(uuid::Uuid::new_v4().to_string());
+                if let Some(id) = &message_id {
+                    reply["~thread"] = json!({"pthid": id});
+                }
+                if let Some(attachments) = attachments {
+                    reply["~attach"] = attachments;
+                }
+                reply
+            }
+        };
+        Ok(self.agent.respond(received, &reply).await?)
+    }
+
+    /// Who a received message is from, as the history keys it: the connection (v1),
+    /// else the sender's DID.
+    fn peer_key_of(&self, received: &Received) -> String {
+        if let Some(connection) = received.sender_key.as_deref().and_then(|k| self.agent.connection_by_key(k)) {
+            return connection.id;
+        }
+        received.sender.clone().or(received.sender_key.clone()).unwrap_or_else(|| "(anonymous)".into())
+    }
+
+    /// Who a message to `target` (a connection id or a DID) goes to, as the history
+    /// keys it.
+    fn peer_key_for(&self, target: &str) -> String {
+        self.agent.connection(target).map(|c| c.id).unwrap_or_else(|| target.to_string())
+    }
+
+    /// This agent's own profile.
+    pub async fn profile(&self) -> Result<Profile, BridgeError> {
+        Ok(self.store.get_json(profile::OWN_KEY).await.map_err(storage)?.unwrap_or_default())
+    }
+
+    /// Replace this agent's profile.
+    pub async fn set_profile(&self, profile: Profile) -> Result<Profile, BridgeError> {
+        let profile = Profile { updated: Some(now() as i64), ..profile.normalized() };
+        if let Some(picture) = &profile.display_picture {
+            let lower = picture.to_ascii_lowercase();
+            if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+                return Err(BridgeError::BadArgument("displayPicture must be an http(s) URL".into()));
+            }
+        }
+        self.store.put_json(profile::OWN_KEY, &profile).await.map_err(storage)?;
+        Ok(profile)
+    }
+
+    /// Profiles peers sent, by peer key.
+    pub async fn peer_profiles(&self) -> Result<HashMap<String, Profile>, BridgeError> {
+        Ok(self.store.get_json(profile::PEERS_KEY).await.map_err(storage)?.unwrap_or_default())
+    }
+
+    /// Send this agent's profile to `target` (asking for theirs back if
+    /// `send_back_yours`), in the DIDComm version the connection or DID speaks.
+    pub async fn share_profile(&self, target: &str, send_back_yours: bool) -> Result<Value, BridgeError> {
+        let ours = self.profile().await?;
+        let version = self.agent.connection(target).map(|c| c.didcomm_version).unwrap_or(DidcommVersion::V2);
+        // v1: `send` makes the body's fields the message's own, attachments `~attach`.
+        let (body, attachments) = profile::profile_message(&ours, None, send_back_yours, version);
+        self.send(Outgoing {
+            target_did: target.to_string(),
+            message_type: profile::PROFILE.into(),
+            body,
+            attachments,
+            validate: false,
+            ..Default::default()
+        })
+        .await
+    }
+
+    /// Ask `target` for their profile; it arrives later (see `peer_profiles`).
+    pub async fn request_profile(&self, target: &str) -> Result<Value, BridgeError> {
+        self.send(Outgoing {
+            target_did: target.to_string(),
+            message_type: profile::REQUEST_PROFILE.into(),
+            body: json!({"query": ["displayName", "displayPicture", "description"]}),
+            validate: false,
+            ..Default::default()
+        })
+        .await
+    }
+
+    /// Conversations for the web UI: each peer's latest message and unread count.
+    pub async fn conversations(&self) -> Result<Value, BridgeError> {
+        let read: HashMap<String, i64> = self.store.get_json(READ_KEY).await.map_err(storage)?.unwrap_or_default();
+        let profiles = self.peer_profiles().await?;
+        let mut list = Vec::new();
+        for c in self.store.conversations().await.map_err(storage)? {
+            let unread = self.store.count_in_after(&c.peer, read.get(&c.peer).copied().unwrap_or(0)).await.map_err(storage)?;
+            list.push(json!({
+                "peer": c.peer,
+                "count": c.count,
+                "unread": unread,
+                "last": c.last,
+                "connection": self.agent.connection(&c.peer).map(|c| connection_json(&c)),
+                "profile": profiles.get(&c.peer),
+            }));
+        }
+        Ok(json!(list))
+    }
+
+    /// A peer's messages for the web UI.
+    pub async fn history(&self, peer: &str, before: Option<i64>, after: Option<i64>, limit: i64) -> Result<Value, BridgeError> {
+        Ok(json!(self.store.history(peer, before, after, limit.clamp(1, 500)).await.map_err(storage)?))
+    }
+
+    /// Mark a peer's messages read up to id `upto`.
+    pub async fn mark_read(&self, peer: &str, upto: i64) -> Result<(), BridgeError> {
+        let mut read: HashMap<String, i64> = self.store.get_json(READ_KEY).await.map_err(storage)?.unwrap_or_default();
+        let entry = read.entry(peer.to_string()).or_insert(0);
+        *entry = (*entry).max(upto);
+        self.store.put_json(READ_KEY, &read).await.map_err(storage)
+    }
+
+    /// Pick up whatever waits at the mediators into the inbox and history, without
+    /// handing it to `fetch_messages` yet. Run in the background so the web UI sees
+    /// messages as they come. Returns problems with the mediators, if any.
+    pub async fn collect(&self, limit: usize) -> Result<Vec<String>, BridgeError> {
+        let _guard = self.collecting.lock().await;
+        let v2 = self.ensure_mediation().await;
+        let v1 = self.ensure_v1_mediation().await;
+        let mut pickups = Vec::new();
+        let mut problems = Vec::new();
+        match &v2 {
+            Ok(_) => match self.agent.pickup(limit).await {
+                Ok(p) => pickups.push(p),
+                Err(e) => problems.push(e.to_string()),
+            },
+            Err(BridgeError::NoMediator) => {}
+            Err(e) => problems.push(e.to_string()),
+        }
+        match &v1 {
+            Ok(_) => match self.agent.pickup_v1(limit).await {
+                Ok(p) => pickups.push(p),
+                Err(e) => problems.push(e.to_string()),
+            },
+            Err(BridgeError::NoV1Mediator) => {}
+            Err(e) => problems.push(e.to_string()),
+        }
+        for pickup in pickups {
+            for received in &pickup.messages {
+                self.take_in(received, "mediator", true).await?;
+            }
+            for (id, error) in &pickup.failed {
+                problems.push(format!("undecryptable message {id}: {error}"));
+            }
+        }
+        self.save_state().await;
+        Ok(problems)
+    }
+
+    /// The server's health for the web UI.
+    pub async fn status(&self) -> Value {
+        let store = match self.store.ping().await {
+            Ok(()) => json!({"ok": true}),
+            Err(e) => json!({"ok": false, "error": format!("{e:#}")}),
+        };
+        json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "storage": {"kind": self.store.kind(), "health": store, "inbox": self.store.inbox_len().await.ok()},
+            "mediation": self.agent.mediation().map(|m| json!({"mediator_did": m.mediator_did, "routing_did": m.routing_did})),
+            "v1_mediation": self.agent.v1_mediation().map(|m| json!({"endpoint": m.endpoint})),
+            "connections": self.agent.connections().len(),
+            "uptime_seconds": self.started.elapsed().as_secs(),
+        })
+    }
+
+    /// The effective configuration for the web UI, without secrets.
+    pub fn config_view(&self) -> Value {
+        let c = &self.config;
+        json!({
+            "public_url": c.public_url,
+            "endpoint": c.inbound_endpoint(),
+            "did_method": if c.web_did().is_some() { "web" } else { "peer" },
+            "registry_did": c.registry_did,
+            "mediator_did": c.mediator_did,
+            "v1_mediator": c.v1_mediator,
+            "allowed_targets": c.allowed_targets,
+            "validate_messages": c.validate_messages,
+            "storage": self.store.kind(),
+            "database": c.database_url.as_deref().map(redact_url),
+            "http": {"bind": c.http.bind, "allowed_hosts": c.http.allowed_hosts, "auth_token": c.http.auth_token.as_ref().map(|_| "(set)")},
+        })
     }
 
     pub fn agent(&self) -> &Agent {
@@ -614,10 +907,39 @@ impl Bridge {
             }
         };
 
-        let reply = if outgoing.wait_for_reply {
-            Some(self.agent.request(&outgoing.target_did, &message).await?)
+        // Recorded before it goes out, so a reply that arrives during the send (at our
+        // endpoint) comes after it in the history; dropped again if sending fails.
+        let recorded = if is_conversation(&normalize_type(&outgoing.message_type)) {
+            let from = match version {
+                DidcommVersion::V2 => message["from"].clone(),
+                DidcommVersion::V1 => json!(self.agent.v1_did()),
+            };
+            let entry = json!({"from": from, "to": outgoing.target_did, "didcomm_version": version, "message": message});
+            match self.store.record(&self.peer_key_for(&outgoing.target_did), "out", now() as i64, entry).await {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    tracing::warn!("can't record a sent message: {e:#}");
+                    None
+                }
+            }
         } else {
-            self.agent.send(&outgoing.target_did, &message).await?
+            None
+        };
+        let sending = if outgoing.wait_for_reply {
+            self.agent.request(&outgoing.target_did, &message).await.map(Some)
+        } else {
+            self.agent.send(&outgoing.target_did, &message).await
+        };
+        let reply = match sending {
+            Ok(reply) => reply,
+            Err(e) => {
+                if let Some(id) = recorded {
+                    if let Err(e) = self.store.forget(id).await {
+                        tracing::warn!("can't drop an unsent message from the history: {e:#}");
+                    }
+                }
+                return Err(e.into());
+            }
         };
 
         let sent = match version {
@@ -638,6 +960,13 @@ impl Bridge {
                 "thid": message["~thread"].get("thid").unwrap_or(&message["@id"]),
             }),
         };
+        if let Some(reply) = &reply {
+            // A reply on the connection goes into the history (and a profile reply is
+            // stored); it's returned here, so not queued for fetch_messages.
+            if let Err(e) = self.take_in(reply, "connection", false).await {
+                tracing::warn!("can't take in a reply: {e}");
+            }
+        }
         let mut result = json!({
             "sent": sent,
             "validation": validation,
@@ -661,59 +990,23 @@ impl Bridge {
     /// taking DID Exchange messages among them a step further and answering
     /// trust-pings and discover-features queries automatically.
     pub async fn fetch(&self, limit: usize) -> Result<Value, BridgeError> {
-        // Messages delivered straight to this agent's endpoint were already handled
-        // (handshakes, auto-replies) when they arrived; they're only collected here.
-        let mut messages = if self.has_inbound() {
-            self.store.take_inbox(limit).await.map_err(|e| BridgeError::Storage(format!("{e:#}")))?
-        } else {
-            Vec::new()
-        };
-        let v2 = self.ensure_mediation().await;
-        let v1 = self.ensure_v1_mediation().await;
+        // Without its own endpoint, an agent with no mediator at all can't receive.
+        if !self.has_inbound() && self.config.mediator_did.is_none() && self.config.v1_mediator.is_none() {
+            return Err(BridgeError::NoMediator);
+        }
+        // Everything received -- delivered to the endpoint, or picked up from the
+        // mediators now or by the background collector -- was handled on arrival
+        // (handshakes, profiles, auto-replies) and waits in the inbox.
+        let problems = self.collect(limit).await?;
         if !self.has_inbound() {
-            if let (Err(e), Err(BridgeError::NoV1Mediator)) = (&v2, &v1) {
-                return Err(match e {
-                    BridgeError::NoMediator => BridgeError::NoMediator,
-                    e => BridgeError::Mediation { mediator: "the mediator".into(), error: e.to_string() },
-                });
-            }
-        }
-        let mut pickups = Vec::new();
-        let mut problems = Vec::new();
-        match &v2 {
-            Ok(_) => pickups.push(self.agent.pickup(limit).await?),
-            Err(BridgeError::NoMediator) => {}
-            Err(e) => problems.push(e.to_string()),
-        }
-        match &v1 {
-            Ok(_) => pickups.push(self.agent.pickup_v1(limit).await?),
-            Err(BridgeError::NoV1Mediator) => {}
-            Err(e) => problems.push(e.to_string()),
-        }
-
-        let mut failed = Vec::new();
-        for pickup in pickups {
-            for received in &pickup.messages {
-                let mut entry = self.received_json(received);
-                if Agent::is_connection_message(received) {
-                    let outcome = match self.agent.handle_connection_message(received).await {
-                        Ok(Some(reply)) => self.agent.respond(received, &reply).await.map(|_| ()),
-                        Ok(None) => Ok(()),
-                        Err(e) => Err(e),
-                    };
-                    entry["handshake"] = match outcome {
-                        Ok(()) => json!("handled; see list_connections"),
-                        Err(e) => json!(format!("failed: {e}")),
-                    };
-                } else if let Some(reply) = self.agent.auto_reply(received) {
-                    let outcome = self.agent.respond(received, &reply).await;
-                    entry["auto_replied"] = json!(outcome.is_ok());
+            if let (Err(e), Err(BridgeError::NoV1Mediator)) = (self.ensure_mediation().await, self.ensure_v1_mediation().await) {
+                if !matches!(e, BridgeError::NoMediator) {
+                    return Err(BridgeError::Mediation { mediator: "the mediator".into(), error: e.to_string() });
                 }
-                messages.push(entry);
             }
-            failed.extend(pickup.failed.iter().map(|(id, error)| json!({"id": id, "error": error})));
         }
-        self.save_state().await;
+        let messages = self.store.take_inbox(limit).await.map_err(storage)?;
+        let (failed, problems): (Vec<String>, Vec<String>) = problems.into_iter().partition(|p| p.starts_with("undecryptable message "));
         let mut result = json!({"messages": messages, "undecryptable": failed});
         if !problems.is_empty() {
             result["mediation_problems"] = json!(problems);

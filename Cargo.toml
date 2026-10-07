@@ -28,6 +28,8 @@ schemars = "1"
 # The registry's didcomm_versions are semver requirements (^1.0, ^2.0).
 semver = "1"
 serde = { version = "1", features = ["derive"] }
+# The web UI (ui/dist), embedded in release builds.
+rust-embed = { version = "8", features = ["mime-guess"] }
 # Postgres storage (database_url): the identity, the state and the inbox.
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "json"] }
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -44,7 +46,7 @@ windows-service = "0.8"
 
 [dev-dependencies]
 base64 = "0.22"
-reqwest = { version = "0.13", features = ["json"] }
+reqwest = { version = "0.13", features = ["json", "cookies"] }
 didcomm-mediator-core = { git = "https://github.com/wyvrn-cloud/didcomm", rev = "4ba7a14f439b47861ac10efad320cfc03acb378c" }
 didcomm-quickstart = { git = "https://github.com/wyvrn-cloud/didcomm", rev = "4ba7a14f439b47861ac10efad320cfc03acb378c" }
 didcomm-resolver-peer = { git = "https://github.com/wyvrn-cloud/didcomm", rev = "4ba7a14f439b47861ac10efad320cfc03acb378c" }

@@ -111,7 +111,7 @@ pub async fn run(args: Args, shutdown: impl Future<Output = ()> + Send + 'static
         tracing::warn!("public_url is set, but DIDComm messages are only received with --http");
     }
     tracing::info!(storage = store.kind(), endpoint = ?config.inbound_endpoint(), "configured");
-    let bridge = Arc::new(Bridge::with_store(agent.with_features(Features::standard().with_v1()), config, store).await?);
+    let bridge = Arc::new(Bridge::with_store(agent.with_features(Features::standard().with_v1().with_protocol(didcomm_mcp::profile::USER_PROFILE, &["sender", "receiver"])), config, store).await?);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), did = %bridge.agent().base_did(), "didcomm-mcp starting");
 
     // Mediate in the background so the MCP handshake isn't held up by the network;
@@ -132,6 +132,20 @@ pub async fn run(args: Args, shutdown: impl Future<Output = ()> + Send + 'static
     });
 
     if args.http.is_some() {
+        // Pick up from the mediators every so often, so the web UI sees messages as
+        // they come (fetch_messages still hands them to the MCP host).
+        if bridge.config().mediator_did.is_some() || bridge.config().v1_mediator.is_some() {
+            let collector = bridge.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(20));
+                loop {
+                    tick.tick().await;
+                    if let Err(e) = collector.collect(50).await {
+                        tracing::debug!("background pickup: {e}");
+                    }
+                }
+            });
+        }
         let http = bridge.config().http.clone();
         return didcomm_mcp::http::serve(bridge, &http, shutdown).await;
     }

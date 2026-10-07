@@ -12,6 +12,12 @@
   own DID document (`/.well-known/did.json`, or `/did.json` under a path). Default
   stays `peer`.
 - `get_identity` reports the `endpoint`, the `storage` and the `did_method` in use.
+- Web UI at `/` with `--http` (Svelte, embedded in the binary): sign in with the HTTP
+  token; chats, connections, profile, system. See [docs/web-ui.md](docs/web-ui.md).
+- User Profile 1.0: answers `request-profile`, stores peers' `profile`s, honours
+  `send_back_yours`; listed in discover-features.
+- A conversation history (Postgres `didcomm_mcp_messages`, or a file), and a background
+  pickup from the mediators with `--http`.
 - Railway: `Dockerfile.railway`, `railway-start.sh`, `railway.toml`; see
   [docs/railway.md](docs/railway.md).
 

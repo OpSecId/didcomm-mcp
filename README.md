@@ -172,6 +172,12 @@ file. A service uses the file `service install` wrote (see
 | `[http] auth_token` | `DIDCOMM_MCP_HTTP_TOKEN` | none | Bearer token for `--http`; required for non-loopback addresses. |
 | `[http] allowed_hosts` | `DIDCOMM_MCP_HTTP_ALLOWED_HOSTS` | loopback names | `Host` header values `--http` accepts. |
 
+## Web UI
+
+With `--http`, a web UI at `/` (sign in with the HTTP token): chats, connections, this
+agent's [User Profile](https://didcomm.org/user-profile/1.0/), and system status. See
+[docs/web-ui.md](docs/web-ui.md).
+
 ## Tests
 
 ```sh

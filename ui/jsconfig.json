@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "checkJs": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "es2022",
+    "strict": false,
+    "noEmit": true
+  },
+  "include": ["src/**/*.js", "src/**/*.svelte", "src/**/*.d.ts"]
+}

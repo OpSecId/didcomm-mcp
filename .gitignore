@@ -30,3 +30,5 @@ target
 
 # Release archives (.github/scripts/package.py)
 /dist/
+/ui/dist/
+/ui/node_modules/
