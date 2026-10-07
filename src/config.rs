@@ -41,6 +41,14 @@ pub struct Config {
     /// Check outgoing messages against the registry's schema for their type (when it
     /// has one) before sending.
     pub validate_messages: bool,
+    /// The public base URL this server is reached at (e.g. `https://agent.example`). If
+    /// set, `--http` also accepts DIDComm messages at `<public_url>/didcomm`, and the
+    /// agent's DID names that endpoint, so peers can deliver straight to it without a
+    /// mediator.
+    pub public_url: Option<String>,
+    /// A Postgres URL. If set, the identity, the state and the inbox live in the
+    /// database instead of `identity_path` / `state_path`.
+    pub database_url: Option<String>,
     /// The Streamable HTTP transport (`--http`).
     pub http: HttpConfig,
 }
@@ -90,6 +98,8 @@ struct ConfigFile {
     state_path: Option<PathBuf>,
     allowed_targets: Option<Vec<String>>,
     validate_messages: Option<bool>,
+    public_url: Option<String>,
+    database_url: Option<String>,
     #[serde(default)]
     http: HttpFile,
 }
@@ -151,7 +161,21 @@ impl Config {
             state_path,
             allowed_targets,
             validate_messages,
+            public_url: env("DIDCOMM_MCP_PUBLIC_URL")
+                .or(file.public_url)
+                .map(|u| u.trim().trim_end_matches('/').to_string())
+                .filter(|u| !u.is_empty()),
+            // DATABASE_URL too: what Railway, Heroku and most hosts set for a database.
+            database_url: env("DIDCOMM_MCP_DATABASE_URL")
+                .or_else(|| env("DATABASE_URL"))
+                .or(file.database_url)
+                .filter(|u| !u.trim().is_empty()),
         }
+    }
+
+    /// Where peers deliver DIDComm messages, if [`public_url`](Self::public_url) is set.
+    pub fn inbound_endpoint(&self) -> Option<String> {
+        self.public_url.as_ref().map(|u| format!("{u}{}", crate::http::DIDCOMM_PATH))
     }
 }
 
@@ -217,6 +241,21 @@ mod tests {
         );
         assert_eq!(config.registry_did.as_deref(), Some("did:example:env"));
         assert!(!config.validate_messages);
+    }
+
+    #[test]
+    fn public_url_and_database() {
+        let config = resolve("", &[]);
+        assert_eq!((config.inbound_endpoint(), config.public_url, config.database_url), (None, None, None));
+
+        let config = resolve("", &[("DIDCOMM_MCP_PUBLIC_URL", "https://a.example/"), ("DATABASE_URL", "postgres://h/db")]);
+        assert_eq!(config.public_url.as_deref(), Some("https://a.example"));
+        assert_eq!(config.inbound_endpoint().as_deref(), Some("https://a.example/didcomm"));
+        assert_eq!(config.database_url.as_deref(), Some("postgres://h/db"));
+
+        let config = resolve("", &[("DIDCOMM_MCP_DATABASE_URL", "postgres://mine/db"), ("DATABASE_URL", "postgres://h/db")]);
+        assert_eq!(config.database_url.as_deref(), Some("postgres://mine/db"));
+        assert_eq!(resolve("", &[("DIDCOMM_MCP_PUBLIC_URL", " ")]).public_url, None);
     }
 
     #[test]

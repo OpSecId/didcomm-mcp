@@ -1,18 +1,22 @@
-# didcomm-mcp for Railway: serves MCP over Streamable HTTP at https://<domain>/mcp.
+# didcomm-mcp for Railway: serves MCP over Streamable HTTP at https://<domain>/mcp, and
+# receives DIDComm messages at https://<domain>/didcomm (no mediator needed).
 #
 # Differs from ./Dockerfile only where Railway's builder requires it:
 #   - no RUN --mount (Railway rejects secret mounts, and cache mounts need a
 #     service-specific id); wyvrn-cloud/didcomm is public, so no token is needed
-#   - no VOLUME; attach a Railway Volume at /data instead
+#   - no VOLUME: with a Postgres database attached, nothing is kept on disk
 #   - binds 0.0.0.0:$PORT and runs with --http by default
 #
-# Required Railway variables:
-#   DIDCOMM_MCP_HTTP_TOKEN          bearer token clients must send (a non-loopback bind
-#                                   refuses to start without one)
-# Optional:
-#   DIDCOMM_MCP_HTTP_ALLOWED_HOSTS  comma-separated Host headers to accept; defaults to
-#                                   $RAILWAY_PUBLIC_DOMAIN
-#   DIDCOMM_MCP_MEDIATOR_DID, DIDCOMM_MCP_REGISTRY_DID, ... (see README)
+# Railway variables:
+#   DIDCOMM_MCP_HTTP_TOKEN    required: the bearer token MCP clients send
+#   DATABASE_URL              ${{Postgres.DATABASE_URL}}: identity, connections and inbox
+#                             live there. Without it they're files under /data, lost on
+#                             redeploy unless a Railway Volume is mounted at /data.
+#   DIDCOMM_MCP_PUBLIC_URL    defaults to https://$RAILWAY_PUBLIC_DOMAIN; set it for a
+#                             custom domain. The agent's DID names <url>/didcomm.
+#   DIDCOMM_MCP_HTTP_ALLOWED_HOSTS  defaults to the public URL's host
+#   DIDCOMM_MCP_MEDIATOR_DID / DIDCOMM_MCP_V1_MEDIATOR / DIDCOMM_MCP_REGISTRY_DID: see
+#                             README ("" disables each)
 FROM rust:1-slim-bookworm AS builder
 
 # git: cargo fetches the didcomm git dependency with the git CLI (.cargo/config.toml).
@@ -30,18 +34,14 @@ ENV CMAKE_BUILD_PARALLEL_LEVEL=2
 RUN cargo build --release --locked -j 2 --bin didcomm-mcp
 
 FROM debian:bookworm-slim
-# ca-certificates: HTTPS to peers, mediators and did:web documents.
+# ca-certificates: HTTPS to peers, mediators, did:web documents and the database.
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir /data
 COPY --from=builder /build/target/release/didcomm-mcp /usr/local/bin/didcomm-mcp
-# Mount a Railway Volume at /data so the agent keeps its DID (and connections) across deploys.
+COPY railway-start.sh /usr/local/bin/railway-start.sh
+# Only used without DATABASE_URL.
 ENV DIDCOMM_MCP_IDENTITY=/data/identity.json
 EXPOSE 8090
-# Runs as root: Railway Volumes mount root-owned, so a non-root user couldn't write /data.
-# Shell form so $PORT / $RAILWAY_PUBLIC_DOMAIN expand at runtime.
-CMD export DIDCOMM_MCP_HTTP_BIND="0.0.0.0:${PORT:-8090}"; \
-    if [ -z "$DIDCOMM_MCP_HTTP_ALLOWED_HOSTS" ] && [ -n "$RAILWAY_PUBLIC_DOMAIN" ]; then \
-        export DIDCOMM_MCP_HTTP_ALLOWED_HOSTS="$RAILWAY_PUBLIC_DOMAIN"; \
-    fi; \
-    exec didcomm-mcp --http
+# Runs as root: if a Railway Volume is used instead of Postgres, it mounts root-owned.
+CMD ["sh", "/usr/local/bin/railway-start.sh"]

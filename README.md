@@ -165,6 +165,8 @@ file. A service uses the file `service install` wrote (see
 | `state_path` | `DIDCOMM_MCP_STATE` | `connections.json` next to the identity | Connections, created invitations and the v1 mediation. |
 | `allowed_targets` | `DIDCOMM_MCP_ALLOWED_TARGETS` (comma-separated) | any | If set, only these DIDs (and connections with them) can be messaged or queried, and only invitations naming one can be accepted. |
 | `validate_messages` | `DIDCOMM_MCP_VALIDATE_MESSAGES` | `true` | Schema-check outgoing messages. |
+| `public_url` | `DIDCOMM_MCP_PUBLIC_URL` | none | The public base URL of this server. With `--http`, DIDComm messages (v1 and v2) are then accepted at `<public_url>/didcomm`, and the agent's DID names that endpoint: peers deliver straight to it, no mediator needed. Delivered messages are queued for `fetch_messages`; trust-pings and DID Exchange are answered on arrival. `create_invitation` works without a v1 mediator. The DID changes with the URL. |
+| `database_url` | `DIDCOMM_MCP_DATABASE_URL`, else `DATABASE_URL` | none | A Postgres URL. The identity (private keys, as in the identity file), the state and the inbox then live in two tables (`didcomm_mcp_kv`, `didcomm_mcp_inbox`, created on startup) instead of files. |
 | `[http] bind` | `DIDCOMM_MCP_HTTP_BIND` | `127.0.0.1:8090` | Address for `--http` (`--http <address>` overrides it). |
 | `[http] auth_token` | `DIDCOMM_MCP_HTTP_TOKEN` | none | Bearer token for `--http`; required for non-loopback addresses. |
 | `[http] allowed_hosts` | `DIDCOMM_MCP_HTTP_ALLOWED_HOSTS` | loopback names | `Host` header values `--http` accepts. |

@@ -13,7 +13,8 @@ use axum::{
     http::{header, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::get,
+    body::Bytes,
+    routing::{get, post},
     Router,
 };
 use rmcp::transport::streamable_http_server::{
@@ -26,6 +27,14 @@ use crate::server::DidcommMcp;
 
 /// Where MCP is served.
 pub const MCP_PATH: &str = "/mcp";
+
+/// Where peers deliver DIDComm messages, when `public_url` is set. Not behind the
+/// bearer token: peers don't have it, and DIDComm messages are encrypted to this
+/// agent and authenticated on their own.
+pub const DIDCOMM_PATH: &str = "/didcomm";
+
+/// The largest DIDComm message accepted at [`DIDCOMM_PATH`].
+const MAX_DIDCOMM_BYTES: usize = 1 << 20;
 
 /// Refuse settings that would expose the agent: a non-loopback `bind` without a token.
 pub fn check(http: &HttpConfig) -> anyhow::Result<SocketAddr> {
@@ -46,6 +55,7 @@ pub fn check(http: &HttpConfig) -> anyhow::Result<SocketAddr> {
 /// The HTTP app: MCP at [`MCP_PATH`] (behind the bearer token, if configured) and an
 /// unauthenticated `GET /healthz`.
 pub fn router(bridge: Arc<Bridge>, http: &HttpConfig) -> Router {
+    let inbound = bridge.config().inbound_endpoint().is_some().then(|| bridge.clone());
     let mut config = StreamableHttpServerConfig::default();
     if let Some(hosts) = &http.allowed_hosts {
         config = config.with_allowed_hosts(hosts.clone());
@@ -59,7 +69,30 @@ pub fn router(bridge: Arc<Bridge>, http: &HttpConfig) -> Router {
     if let Some(token) = &http.auth_token {
         mcp = mcp.layer(middleware::from_fn_with_state(Arc::<str>::from(token.as_str()), require_token));
     }
+    if let Some(bridge) = inbound {
+        let didcomm = Router::new()
+            .route(DIDCOMM_PATH, post(receive_didcomm))
+            .layer(axum::extract::DefaultBodyLimit::max(MAX_DIDCOMM_BYTES))
+            .with_state(bridge);
+        mcp = mcp.merge(didcomm);
+    }
     mcp.route("/healthz", get(|| async { "ok" }))
+}
+
+/// `POST /didcomm`: a packed DIDComm message (v1 or v2) for this agent.
+async fn receive_didcomm(State(bridge): State<Arc<Bridge>>, body: Bytes) -> Response {
+    match bridge.deliver(&body).await {
+        Ok(Some(reply)) => reply.into_response(),
+        Ok(None) => StatusCode::ACCEPTED.into_response(),
+        Err(crate::bridge::BridgeError::Storage(e)) => {
+            tracing::error!("couldn't queue a delivered message: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "couldn't store the message").into_response()
+        }
+        Err(e) => {
+            tracing::info!("rejected a delivered message: {e}");
+            (StatusCode::BAD_REQUEST, "not a DIDComm message for this agent").into_response()
+        }
+    }
 }
 
 /// Serve until `shutdown` completes.

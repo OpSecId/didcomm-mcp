@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Receiving without a mediator: with `public_url` set, `--http` accepts DIDComm
+  messages at `/didcomm` and the agent's DID names that endpoint. Messages are queued
+  for `fetch_messages`; trust-pings and DID Exchange are answered when they arrive;
+  `create_invitation` uses the endpoint when there's no v1 mediator.
+- Postgres storage: with `database_url` (or `DATABASE_URL`), the identity, state and
+  inbox are kept in the database instead of files.
+- `get_identity` reports the `endpoint` and the `storage` in use.
+- Railway: `Dockerfile.railway`, `railway-start.sh`, `railway.toml`; see
+  [docs/railway.md](docs/railway.md).
+
 ## 0.1.1 - 2026-10-07
 
 - Fixed: a build against the current `didcomm` failed every registry call against

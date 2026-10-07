@@ -55,9 +55,11 @@ async fn start_server() -> String {
         state_path: std::env::temp_dir().join(format!("didcomm-mcp-test-{}.json", uuid::Uuid::new_v4())),
         allowed_targets: None,
         validate_messages: true,
+        public_url: None,
+        database_url: None,
         http: http_config.clone(),
     };
-    let bridge = Arc::new(Bridge::new(Agent::new(Identity::generate().unwrap()).unwrap(), config));
+    let bridge = Arc::new(Bridge::new(Agent::new(Identity::generate().unwrap()).unwrap(), config).await);
     let app = http::router(bridge, &http_config);
     tokio::spawn(async move { axum::serve(listener, app).await });
     url

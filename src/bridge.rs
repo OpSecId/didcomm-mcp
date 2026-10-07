@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
+use anyhow::Context;
+
 use didcomm_agent::{
     features, Agent, AgentError, Connection, ConnectionBook, DidcommVersion, Mediation, Received, V1Mediation,
 };
@@ -12,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::config::Config;
+use crate::store::Store;
 
 /// The documentation protocol this bridge speaks, and the version it falls back to for
 /// registries that don't know it yet.
@@ -50,6 +53,8 @@ pub enum BridgeError {
     NoV1Mediator,
     #[error("{0}")]
     BadArgument(String),
+    #[error("storage: {0}")]
+    Storage(String),
 }
 
 /// What `send_didcomm_message` was asked to send.
@@ -71,8 +76,10 @@ pub struct Bridge {
     /// Serializes mediation attempts; the outcome itself lives in the agent.
     mediating: tokio::sync::Mutex<()>,
     mediating_v1: tokio::sync::Mutex<()>,
-    /// Serializes writes of the state file.
-    saving: Mutex<()>,
+    /// Identity, state and inbox: files or Postgres.
+    store: Store,
+    /// Serializes writes of the state.
+    saving: tokio::sync::Mutex<()>,
     /// Message type → what the registry says about it (`None`: it doesn't know it).
     known_types: Mutex<HashMap<String, Option<KnownType>>>,
     /// The registry only speaks documentation/1.0.
@@ -148,48 +155,87 @@ fn admits(ranges: &[String], versions: &[(u64, u64)]) -> bool {
 }
 
 impl Bridge {
-    /// Restores connections and the v1 mediation from the state file, if there is one.
-    pub fn new(agent: Agent, config: Config) -> Self {
+    /// With the file store (`identity_path` / `state_path`): restores connections and
+    /// the v1 mediation from the state file, if there is one.
+    pub async fn new(agent: Agent, config: Config) -> Self {
+        let store = Store::files(&config.identity_path, &config.state_path);
+        Self::with_store(agent, config, store).await.expect("the file store logs read errors instead of failing")
+    }
+
+    /// With `store`: restores connections and the v1 mediation from it. Fails if a
+    /// database can't be read, so a session never starts empty and then overwrites the
+    /// saved state.
+    pub async fn with_store(agent: Agent, config: Config, store: Store) -> anyhow::Result<Self> {
+        let state = store.load_state().await.context("loading the saved state")?;
         let bridge = Self {
             agent,
             config,
+            store,
             mediating: tokio::sync::Mutex::new(()),
             mediating_v1: tokio::sync::Mutex::new(()),
-            saving: Mutex::new(()),
+            saving: tokio::sync::Mutex::new(()),
             known_types: Mutex::new(HashMap::new()),
             registry_is_1_0: AtomicBool::new(false),
         };
-        match std::fs::read_to_string(&bridge.config.state_path) {
-            Ok(text) => match serde_json::from_str::<State>(&text) {
+        if let Some(text) = state {
+            match serde_json::from_str::<State>(&text) {
                 Ok(state) => {
                     bridge.agent.import_connections(state.connections);
                     bridge.agent.restore_v1_mediation(state.v1_mediation);
                 }
-                Err(e) => tracing::warn!("ignoring {}: {e}", bridge.config.state_path.display()),
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => tracing::warn!("can't read {}: {e}", bridge.config.state_path.display()),
+                Err(e) => tracing::warn!("ignoring the saved state ({}): {e}", bridge.store.kind()),
+            }
         }
-        bridge
+        Ok(bridge)
     }
 
-    /// Write connections and the v1 mediation to the state file (a sibling temporary
-    /// file renamed over it). Failure is logged, not fatal: the session goes on in memory.
-    fn save_state(&self) {
-        let _guard = self.saving.lock().expect("state lock poisoned");
+    /// Save connections and the v1 mediation. Failure is logged, not fatal: the session
+    /// goes on in memory.
+    async fn save_state(&self) {
+        let _guard = self.saving.lock().await;
         let state = State { connections: self.agent.export_connections(), v1_mediation: self.agent.v1_mediation() };
-        let path = &self.config.state_path;
-        let write = || -> std::io::Result<()> {
-            if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-                std::fs::create_dir_all(dir)?;
-            }
-            let tmp = path.with_extension("tmp");
-            std::fs::write(&tmp, serde_json::to_vec_pretty(&state)?)?;
-            std::fs::rename(&tmp, path)
+        let saved = match serde_json::to_string_pretty(&state) {
+            Ok(json) => self.store.save_state(json).await,
+            Err(e) => Err(e.into()),
         };
-        if let Err(e) = write() {
-            tracing::warn!("can't save {}: {e}", path.display());
+        if let Err(e) = saved {
+            tracing::warn!("can't save the state ({}): {e:#}", self.store.kind());
         }
+    }
+
+    /// Whether peers can deliver to this agent's own endpoint (`public_url`).
+    fn has_inbound(&self) -> bool {
+        self.config.inbound_endpoint().is_some()
+    }
+
+    /// A message POSTed to this agent's own endpoint (`/didcomm`): unpack it, take DID
+    /// Exchange a step further and answer trust-pings and feature queries, as
+    /// `fetch_messages` does for picked-up messages, and queue it for
+    /// `fetch_messages`. Returns the packed reply to write back on the connection, when
+    /// the sender asked for one (`return_route`).
+    pub async fn deliver(&self, packed: &[u8]) -> Result<Option<Vec<u8>>, BridgeError> {
+        let received = self.agent.receive(packed).await?;
+        let mut entry = self.received_json(&received);
+        entry["via"] = json!("endpoint");
+        let mut on_connection = None;
+        if Agent::is_connection_message(&received) {
+            let outcome = match self.agent.handle_connection_message(&received).await {
+                Ok(Some(reply)) => self.agent.respond(&received, &reply).await.map(|packed| on_connection = packed),
+                Ok(None) => Ok(()),
+                Err(e) => Err(e),
+            };
+            self.save_state().await;
+            entry["handshake"] = match outcome {
+                Ok(()) => json!("handled; see list_connections"),
+                Err(e) => json!(format!("failed: {e}")),
+            };
+        } else if let Some(reply) = self.agent.auto_reply(&received) {
+            let outcome = self.agent.respond(&received, &reply).await;
+            entry["auto_replied"] = json!(outcome.is_ok());
+            on_connection = outcome.ok().flatten();
+        }
+        self.store.push_inbox(entry).await.map_err(|e| BridgeError::Storage(format!("{e:#}")))?;
+        Ok(on_connection)
     }
 
     pub fn agent(&self) -> &Agent {
@@ -236,7 +282,7 @@ impl Bridge {
         };
         let connection = self.agent.accept_invitation(&invitation, DEFAULT_LABEL).await.map_err(failed)?;
         let mediation = self.agent.mediate_v1(&connection.id).await.map_err(failed);
-        self.save_state();
+        self.save_state().await;
         mediation
     }
 
@@ -276,7 +322,9 @@ impl Bridge {
             "base_did": self.agent.base_did(),
             "mediation": mediation,
             "registry_did": self.config.registry_did,
-            "can_receive": self.agent.mediation().is_some(),
+            "can_receive": self.agent.mediation().is_some() || self.has_inbound(),
+            "endpoint": self.config.inbound_endpoint(),
+            "storage": self.store.kind(),
             "didcomm_v1": {
                 "did": self.agent.v1_did(),
                 "verkey": self.agent.v1_verkey(),
@@ -305,20 +353,25 @@ impl Bridge {
             }
         }
         let connection = self.agent.accept_invitation(&invitation, label.unwrap_or(DEFAULT_LABEL)).await;
-        self.save_state();
+        self.save_state().await;
         Ok(connection?)
     }
 
     /// `create_invitation`: an out-of-band invitation to connect with this agent over
     /// DIDComm v1 (DID Exchange), as JSON and as a URL.
     pub async fn create_invitation(&self, label: Option<&str>) -> Result<Value, BridgeError> {
-        let mediation = self.ensure_v1_mediation().await?;
+        // Through the v1 mediator if there is one; else at this agent's own endpoint.
+        let base = match (self.ensure_v1_mediation().await, self.config.inbound_endpoint()) {
+            (Ok(mediation), _) => mediation.endpoint,
+            (Err(BridgeError::NoV1Mediator), Some(endpoint)) => endpoint,
+            (Err(e), _) => return Err(e),
+        };
         let invitation = self.agent.create_invitation(label.unwrap_or(DEFAULT_LABEL))?;
-        self.save_state();
+        self.save_state().await;
         Ok(json!({
             "invitation": invitation,
-            "invitation_url": Agent::invitation_url(&mediation.endpoint, &invitation),
-            "note": "Any number of peers can accept it. Their requests arrive through the mediator: call fetch_messages, which completes the connections.",
+            "invitation_url": Agent::invitation_url(&base, &invitation),
+            "note": "Any number of peers can accept it. Their requests arrive at this agent: call fetch_messages, which completes the connections.",
         }))
     }
 
@@ -573,10 +626,10 @@ impl Bridge {
         if reply.is_none() {
             let can_receive = match version {
                 DidcommVersion::V1 => self.agent.v1_reachable(),
-                DidcommVersion::V2 => self.agent.mediation().is_some(),
+                DidcommVersion::V2 => self.agent.mediation().is_some() || self.has_inbound(),
             };
             result["note"] = json!(match (can_receive, mediation_problem) {
-                (true, _) => "Delivered. Any reply arrives through the mediator: call fetch_messages.".to_string(),
+                (true, _) => "Delivered. Any reply arrives later: call fetch_messages.".to_string(),
                 (false, Some(problem)) => format!("Delivered, but this agent can't receive replies ({problem}). Use wait_for_reply to get a reply on the same connection."),
                 (false, None) => "Delivered, but no mediator is configured, so replies can't reach this agent. Use wait_for_reply to get a reply on the same connection.".to_string(),
             });
@@ -588,17 +641,29 @@ impl Bridge {
     /// taking DID Exchange messages among them a step further and answering
     /// trust-pings and discover-features queries automatically.
     pub async fn fetch(&self, limit: usize) -> Result<Value, BridgeError> {
+        // Messages delivered straight to this agent's endpoint were already handled
+        // (handshakes, auto-replies) when they arrived; they're only collected here.
+        let mut messages = if self.has_inbound() {
+            self.store.take_inbox(limit).await.map_err(|e| BridgeError::Storage(format!("{e:#}")))?
+        } else {
+            Vec::new()
+        };
         let v2 = self.ensure_mediation().await;
         let v1 = self.ensure_v1_mediation().await;
-        if let (Err(e), Err(BridgeError::NoV1Mediator)) = (&v2, &v1) {
-            return Err(BridgeError::Mediation { mediator: "the mediator".into(), error: e.to_string() });
+        if !self.has_inbound() {
+            if let (Err(e), Err(BridgeError::NoV1Mediator)) = (&v2, &v1) {
+                return Err(match e {
+                    BridgeError::NoMediator => BridgeError::NoMediator,
+                    e => BridgeError::Mediation { mediator: "the mediator".into(), error: e.to_string() },
+                });
+            }
         }
         let mut pickups = Vec::new();
         let mut problems = Vec::new();
-        if v2.is_ok() {
-            pickups.push(self.agent.pickup(limit).await?);
-        } else if let Err(e) = &v2 {
-            problems.push(e.to_string());
+        match &v2 {
+            Ok(_) => pickups.push(self.agent.pickup(limit).await?),
+            Err(BridgeError::NoMediator) => {}
+            Err(e) => problems.push(e.to_string()),
         }
         match &v1 {
             Ok(_) => pickups.push(self.agent.pickup_v1(limit).await?),
@@ -606,7 +671,6 @@ impl Bridge {
             Err(e) => problems.push(e.to_string()),
         }
 
-        let mut messages = Vec::new();
         let mut failed = Vec::new();
         for pickup in pickups {
             for received in &pickup.messages {
@@ -629,7 +693,7 @@ impl Bridge {
             }
             failed.extend(pickup.failed.iter().map(|(id, error)| json!({"id": id, "error": error})));
         }
-        self.save_state();
+        self.save_state().await;
         let mut result = json!({"messages": messages, "undecryptable": failed});
         if !problems.is_empty() {
             result["mediation_problems"] = json!(problems);

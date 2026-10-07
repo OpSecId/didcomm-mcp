@@ -206,6 +206,8 @@ async fn world_with(registry_answers: fn(&Received) -> Option<Value>, customize:
         state_path: temp_state_path(),
         allowed_targets: None,
         validate_messages: true,
+        public_url: None,
+        database_url: None,
         http: Default::default(),
     };
     customize(&mut config);
@@ -216,7 +218,7 @@ async fn world_with(registry_answers: fn(&Received) -> Option<Value>, customize:
 
 /// An MCP client connected to a fresh server with `identity` and `config`.
 async fn serve(identity: Identity, config: Config) -> RunningService<RoleClient, TestClient> {
-    let bridge = Arc::new(Bridge::new(Agent::new(identity).unwrap(), config));
+    let bridge = Arc::new(Bridge::new(Agent::new(identity).unwrap(), config).await);
     let (server_io, client_io) = tokio::io::duplex(1 << 20);
     tokio::spawn(async move { DidcommMcp::new(bridge).serve(server_io).await.unwrap().waiting().await });
     TestClient.serve(client_io).await.unwrap()

@@ -2,9 +2,8 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Context;
-use didcomm_agent::{Agent, Features, Identity};
-use didcomm_mcp::{bridge::Bridge, config::Config, server::DidcommMcp};
+use didcomm_agent::{Agent, Features};
+use didcomm_mcp::{bridge::Bridge, config::Config, server::DidcommMcp, store::Store};
 use rmcp::ServiceExt;
 
 mod service;
@@ -101,9 +100,23 @@ pub async fn run(args: Args, shutdown: impl Future<Output = ()> + Send + 'static
         // Fail on unsafe HTTP settings before touching the identity or the network.
         didcomm_mcp::http::check(&config.http)?;
     }
-    let identity = Identity::load_or_generate(&config.identity_path)
-        .with_context(|| format!("identity file {}", config.identity_path.display()))?;
-    let bridge = Arc::new(Bridge::new(Agent::new(identity)?.with_features(Features::standard().with_v1()), config));
+    let store = match &config.database_url {
+        Some(url) => Store::postgres(url).await?,
+        None => Store::files(&config.identity_path, &config.state_path),
+    };
+    let identity = store.load_or_generate_identity().await?;
+    // With a public URL, the DID names this server's own /didcomm endpoint.
+    let agent = match config.inbound_endpoint() {
+        Some(endpoint) => {
+            if args.http.is_none() {
+                tracing::warn!("public_url is set, but DIDComm messages are only received with --http");
+            }
+            Agent::with_endpoint(identity, &endpoint)?
+        }
+        None => Agent::new(identity)?,
+    };
+    tracing::info!(storage = store.kind(), endpoint = ?config.inbound_endpoint(), "configured");
+    let bridge = Arc::new(Bridge::with_store(agent.with_features(Features::standard().with_v1()), config, store).await?);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), did = %bridge.agent().base_did(), "didcomm-mcp starting");
 
     // Mediate in the background so the MCP handshake isn't held up by the network;
