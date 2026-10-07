@@ -6,6 +6,7 @@
   import { peerName, short, copy, when } from './util.js';
   import Avatar from './Avatar.svelte';
   import Icon from './Icon.svelte';
+  import QrCode from './QrCode.svelte';
 
   let connections = $state([]);
   let loading = $state(true);
@@ -13,6 +14,19 @@
   let creating = $state(false);
   let accepting = $state(false);
   let incoming = $state('');
+  let copied = $state(false);
+  let enlarged = $state(false);
+
+  /** The invitation URL shortened in the middle: https://agent.didcomm.link/didcomm?oob=eyJ…Q30 */
+  function truncateMiddle(url, head = 42, tail = 10) {
+    return url.length <= head + tail + 1 ? url : `${url.slice(0, head)}…${url.slice(-tail)}`;
+  }
+
+  async function copyInvitation() {
+    copied = await copy(invitation.invitation_url);
+    toast(copied ? 'Invitation copied' : 'Copy failed', copied ? 'info' : 'error');
+    if (copied) setTimeout(() => (copied = false), 2000);
+  }
 
   async function load() {
     try {
@@ -72,9 +86,17 @@
       <h3><Icon name="link" size={18} /> Invite someone</h3>
       <p class="muted">An out-of-band invitation for another agent to connect to this one.</p>
       {#if invitation}
-        <div class="invite">
-          <code>{invitation.invitation_url}</code>
-          <button class="btn small" onclick={() => copy(invitation.invitation_url).then((ok) => toast(ok ? 'Invitation copied' : 'Copy failed'))}><Icon name="copy" size={16} /> Copy</button>
+        <div class="invitation">
+          <button class="qr-btn" onclick={() => (enlarged = true)} title="Show larger for scanning">
+            <QrCode value={invitation.invitation_url} size={280} label="Invitation QR code" />
+          </button>
+          <p class="muted scan">Scan with a DIDComm wallet (tap to enlarge), or share the link.</p>
+          <div class="invite">
+            <code title={invitation.invitation_url}>{truncateMiddle(invitation.invitation_url)}</code>
+            <button class="icon-btn" class:done={copied} onclick={copyInvitation} title="Copy invitation URL" aria-label="Copy invitation URL">
+              <Icon name={copied ? 'check' : 'copy'} size={18} />
+            </button>
+          </div>
         </div>
       {/if}
       <button class="btn primary" onclick={createInvitation} disabled={creating}>{creating ? 'Creating…' : invitation ? 'New invitation' : 'Create invitation'}</button>
@@ -86,6 +108,16 @@
       <button class="btn primary" disabled={!incoming.trim() || accepting}>{accepting ? 'Connecting…' : 'Connect'}</button>
     </form>
   </div>
+
+  {#if enlarged && invitation}
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <div class="overlay" onclick={() => (enlarged = false)}>
+      <div class="big" role="dialog" aria-label="Invitation QR code">
+        <QrCode value={invitation.invitation_url} size={Math.min(560, innerWidth - 48, innerHeight - 140)} label="Invitation QR code" />
+        <button class="btn" onclick={() => (enlarged = false)}><Icon name="x" size={16} /> Close</button>
+      </div>
+    </div>
+  {/if}
 
   <div class="section-title">{connections.length} connection{connections.length === 1 ? '' : 's'}</div>
   {#if loading}
@@ -145,13 +177,57 @@
   .pad .btn {
     justify-self: start;
   }
-  .invite {
-    display: flex;
-    gap: 0.5rem;
-    align-items: center;
+  .invitation {
+    display: grid;
+    justify-items: center;
+    gap: 0.75rem;
+    padding: 1rem;
+    border: 1px solid var(--border);
+    border-radius: 12px;
     background: var(--panel-2);
+  }
+  .qr-btn {
+    border: none;
+    padding: 0;
+    background: none;
+    cursor: zoom-in;
+    border-radius: 12px;
+  }
+  .overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    display: grid;
+    place-items: center;
+    background: rgba(10, 12, 20, 0.72);
+    cursor: zoom-out;
+  }
+  .big {
+    display: grid;
+    justify-items: center;
+    gap: 1rem;
+    padding: 1.25rem;
+    background: #fff;
+    border-radius: 18px;
+  }
+  .big .btn {
+    background: #fff;
+    color: #171a26;
+    border-color: #e3e6ef;
+  }
+  .scan {
+    font-size: 0.85rem;
+    text-align: center;
+  }
+  .invite {
+    width: 100%;
+    display: flex;
+    gap: 0.25rem;
+    align-items: center;
+    background: var(--panel);
+    border: 1px solid var(--border);
     border-radius: 10px;
-    padding: 0.5rem 0.6rem;
+    padding: 0.3rem 0.3rem 0.3rem 0.7rem;
   }
   .invite code {
     flex: 1;
@@ -159,6 +235,9 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .icon-btn.done {
+    color: var(--ok);
   }
   .list {
     overflow: hidden;
